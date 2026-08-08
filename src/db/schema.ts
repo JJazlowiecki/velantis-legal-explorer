@@ -9,6 +9,7 @@ import {
 	timestamp,
 	uniqueIndex,
 	uuid,
+	vector,
 } from "drizzle-orm/pg-core";
 
 export const legalActs = pgTable(
@@ -145,5 +146,29 @@ export const legalProvisions = pgTable(
 			table.structuralPath,
 		),
 		uniqueIndex("legal_provisions_ordinal_uidx").on(table.legalActVersionId, table.ordinal),
+	],
+);
+
+export const legalSearchDocuments = pgTable(
+	"legal_search_documents",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		legalProvisionId: uuid("legal_provision_id")
+			.notNull()
+			.references(() => legalProvisions.id, { onDelete: "cascade" }),
+		legalActVersionId: uuid("legal_act_version_id")
+			.notNull()
+			.references(() => legalActVersions.id, { onDelete: "cascade" }),
+		content: text("content").notNull(),
+		contentHash: text("content_hash").notNull(),
+		embedding: vector("embedding", { dimensions: 1536 }),
+		embeddingModel: text("embedding_model"),
+		embeddedAt: timestamp("embedded_at", { withTimezone: true }),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => [
+		uniqueIndex("legal_search_documents_legal_provision_id_uidx").on(table.legalProvisionId),
+		index("legal_search_documents_legal_act_version_id_idx").on(table.legalActVersionId),
 	],
 );

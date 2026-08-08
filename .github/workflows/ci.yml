@@ -31,6 +31,11 @@ jobs:
       POSTGRES_USER: velantis
       POSTGRES_PASSWORD: velantis
       DATABASE_URL: postgresql://velantis:velantis@localhost:5432/velantis_test
+      # A distinct disposable database on the same throwaway CI Postgres service.
+      # Kept a different name (not just a different env var pointing at the same
+      # database) so the "TEST_DATABASE_URL !== DATABASE_URL" safety guard in the
+      # integration tests holds in CI too, not just locally.
+      TEST_DATABASE_URL: postgresql://velantis:velantis@localhost:5432/velantis_test_integration
 
     steps:
       - name: Checkout
@@ -51,8 +56,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run migrations
+      - name: Create test integration database
+        run: PGPASSWORD=velantis psql -h localhost -U velantis -d velantis_test -c 'CREATE DATABASE velantis_test_integration;'
+
+      - name: Run migrations (app database)
         run: pnpm db:migrate
+
+      - name: Run migrations (test database)
+        run: pnpm db:migrate
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
 
       - name: Lint
         run: pnpm lint
