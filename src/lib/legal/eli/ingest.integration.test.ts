@@ -1,9 +1,8 @@
 import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { legalActResources, legalActs, legalActVersions, legalProvisions } from "../../../db/schema";
+import { legalActResources, legalActs, legalActVersions } from "../../../db/schema";
+import { createTestDatabase } from "../../test-support/test-db";
 import fixture from "./__fixtures__/du-1964-93.json";
 import type { DiscoveredOfficialExpression } from "./expressions";
 import { ingestEliActMetadata } from "./ingest";
@@ -29,15 +28,10 @@ const discoveredExpressions: DiscoveredOfficialExpression[] = [
   },
 ];
 
-const hasDatabase = Boolean(process.env.DATABASE_URL);
-const describeDatabase = hasDatabase ? describe : describe.skip;
-
-const client = process.env.DATABASE_URL
-  ? postgres(process.env.DATABASE_URL, { max: 1 })
-  : undefined;
-const db = client
-  ? drizzle({ client, schema: { legalActs, legalActVersions, legalActResources, legalProvisions } })
-  : undefined;
+const testDatabase = createTestDatabase();
+const describeDatabase = testDatabase ? describe : describe.skip;
+const client = testDatabase?.client;
+const db = testDatabase?.db;
 
 afterAll(async () => {
   await client?.end({ timeout: 1 });
