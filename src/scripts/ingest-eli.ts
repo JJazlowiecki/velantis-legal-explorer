@@ -19,6 +19,22 @@ async function main() {
   console.log(
     `resources: inserted=${result.resources.inserted} updated=${result.resources.updated} unchanged=${result.resources.unchanged}`,
   );
+  console.log(
+    `resource_state: resolved=${result.resources.resolvedCount} unresolved=${result.resources.unresolvedCount}`,
+  );
+  console.log(
+    `source_selection: retrieval=${result.sourceSelection.retrievalVersion ?? "none"} authoritative=${result.sourceSelection.authoritativeVersion ?? "none"}`,
+  );
+
+  console.log(`retrieval_reason: ${result.sourceSelection.retrievalReason}`);
+  console.log(`authority_reason: ${result.sourceSelection.authorityReason}`);
+
+  if (result.sourceSelection.warnings.length > 0) {
+    console.log("warnings:");
+    for (const warning of result.sourceSelection.warnings) {
+      console.log(`- ${warning}`);
+    }
+  }
 }
 
 main().catch((error: unknown) => {

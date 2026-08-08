@@ -1,17 +1,24 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, notInArray } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import { z } from "zod";
 
 import * as schema from "../../../db/schema";
 import { legalActResources, legalActs, legalActVersions } from "../../../db/schema";
+import { buildActApiUrl, fetchEliActMetadata } from "./client";
+import {
+  choosePreferredCurrentExpression,
+  discoverOfficialExpressions,
+  toExpressionCandidate,
+  type DiscoveredOfficialExpression,
+  type ExpressionSelectionResult,
+} from "./expressions";
 import {
   type EliActMetadata,
   ELI_API_BASE_URL,
   ELI_SOURCE,
+  type ExpressionAuthorityClass,
+  type LegalActVersionKind,
 } from "./schema";
-import { buildActApiUrl, fetchEliActMetadata } from "./client";
-
-const UNKNOWN_VERSION_KEY = "SEJM_ELI:UNKNOWN_VERSION";
 
 const cliArgsSchema = z.object({
   publisher: z
@@ -52,26 +59,62 @@ export interface IngestResult {
     inserted: number;
     updated: number;
     unchanged: number;
+    resolvedCount: number;
+    unresolvedCount: number;
+  };
+  sourceSelection: {
+    retrievalVersion: string | null;
+    authoritativeVersion: string | null;
+    retrievalReason: string;
+    authorityReason: string;
+    warnings: string[];
   };
 }
 
 export interface IngestOptions {
   now?: Date;
   fetchMetadata?: typeof fetchEliActMetadata;
+  discoverExpressions?: typeof discoverOfficialExpressions;
   db?: PostgresJsDatabase<typeof schema>;
 }
 
 type LegalActInsertInput = typeof legalActs.$inferInsert;
 type LegalActVersionInsertInput = typeof legalActVersions.$inferInsert;
 type LegalActResourceInsertInput = typeof legalActResources.$inferInsert;
-type LegalActVersionDraft = Omit<
-  LegalActVersionInsertInput,
-  "id" | "legalActId" | "fetchedAt" | "createdAt" | "updatedAt"
->;
+type LegalActVersionDraft = {
+  versionKind: LegalActVersionKind;
+  legalStateDate: string | null;
+  effectiveFrom: string | null;
+  effectiveTo: string | null;
+  sourceExpressionId: string;
+  canonicalEliUri: string | null;
+  authorityClass: ExpressionAuthorityClass;
+  nonAuthoritative: boolean;
+  currentnessStatus: "proven_current" | "unproven";
+  sourceDocumentKey: string;
+  sourceUpdatedAt: Date | null;
+  contentHash: string | null;
+  sourceHtmlUrl: string | null;
+  sourcePdfUrl: string | null;
+  sourceUnifiedPdfUrl: string | null;
+  isCurrent: boolean;
+};
+
 type LegalActResourceDraft = Omit<
   LegalActResourceInsertInput,
-  "id" | "legalActVersionId" | "createdAt" | "updatedAt"
+  "id" | "legalActId" | "legalActVersionId" | "createdAt" | "updatedAt"
 >;
+
+type VersionWithResourcesDraft = {
+  version: LegalActVersionDraft;
+  resources: LegalActResourceDraft[];
+};
+
+export interface IngestDraftBundle {
+  versions: VersionWithResourcesDraft[];
+  unresolvedActResources: LegalActResourceDraft[];
+  selection: ExpressionSelectionResult;
+}
 
 export function parseIngestCliArgs(argv: string[]): IngestCliArgs {
   const parsed: Record<string, string | undefined> = {};
@@ -140,25 +183,6 @@ export function mapEliMetadataToLegalAct(metadata: EliActMetadata): LegalActInse
   };
 }
 
-export function mapEliMetadataToLegalActVersion(metadata: EliActMetadata): LegalActVersionDraft {
-  const sourceUpdatedAt = metadata.changeDate ? new Date(metadata.changeDate) : null;
-  const effectiveFrom = metadata.validFrom ?? metadata.entryIntoForce ?? null;
-
-  return {
-    versionKind: "unknown",
-    legalStateDate: null,
-    effectiveFrom,
-    effectiveTo: null,
-    sourceDocumentKey: UNKNOWN_VERSION_KEY,
-    sourceUpdatedAt,
-    contentHash: null,
-    sourceHtmlUrl: null,
-    sourcePdfUrl: null,
-    sourceUnifiedPdfUrl: null,
-    isCurrent: false,
-  };
-}
-
 function detectRepresentationType(fileName: string): string {
   const normalized = fileName.toLowerCase();
 
@@ -173,7 +197,7 @@ function detectRepresentationType(fileName: string): string {
   return "other";
 }
 
-export function mapEliMetadataToLegalActResources(metadata: EliActMetadata): LegalActResourceDraft[] {
+export function mapEliMetadataToRawResources(metadata: EliActMetadata): LegalActResourceDraft[] {
   const baseActUrl = buildActApiUrl(
     {
       publisher: metadata.publisher,
@@ -194,9 +218,8 @@ export function mapEliMetadataToLegalActResources(metadata: EliActMetadata): Leg
   >();
 
   for (const item of metadata.texts ?? []) {
-    const fileName = item.fileName;
-    const sourceUrl = `${baseActUrl}/${encodeURIComponent(fileName)}`;
     const sourceTypeCode = item.type?.trim().toUpperCase() || "UNKNOWN";
+    const sourceUrl = `${baseActUrl}/${encodeURIComponent(item.fileName)}`;
 
     const existing = resources.get(sourceUrl);
     if (existing) {
@@ -205,9 +228,9 @@ export function mapEliMetadataToLegalActResources(metadata: EliActMetadata): Leg
     }
 
     resources.set(sourceUrl, {
-      fileName,
+      fileName: item.fileName,
       sourceUrl,
-      representationType: detectRepresentationType(fileName),
+      representationType: detectRepresentationType(item.fileName),
       sourceTypeCodes: new Set([sourceTypeCode]),
     });
   }
@@ -219,6 +242,7 @@ export function mapEliMetadataToLegalActResources(metadata: EliActMetadata): Leg
   if (metadata.textHTML && !hasHtmlResource) {
     const fallbackHtmlFileName = "text.html";
     const fallbackHtmlUrl = `${baseActUrl}/${fallbackHtmlFileName}`;
+
     resources.set(fallbackHtmlUrl, {
       fileName: fallbackHtmlFileName,
       sourceUrl: fallbackHtmlUrl,
@@ -236,6 +260,84 @@ export function mapEliMetadataToLegalActResources(metadata: EliActMetadata): Leg
       contentHash: null,
     }))
     .sort((a, b) => a.sourceUrl.localeCompare(b.sourceUrl));
+}
+
+function mapDiscoveredExpressionToVersionDraft(
+  metadata: EliActMetadata,
+  expression: DiscoveredOfficialExpression,
+): LegalActVersionDraft {
+  const sourceUpdatedAt = metadata.changeDate ? new Date(metadata.changeDate) : null;
+  const candidate = toExpressionCandidate(
+    {
+      sourceExpressionId: expression.sourceExpressionId,
+      versionKind: expression.versionKind,
+      canonicalEliUri: expression.canonicalEliUri,
+      evidence: expression.evidence,
+    },
+    "unproven",
+  );
+
+  return {
+    versionKind: expression.versionKind,
+    legalStateDate: null,
+    effectiveFrom: metadata.validFrom ?? metadata.entryIntoForce ?? null,
+    effectiveTo: null,
+    sourceExpressionId: expression.sourceExpressionId,
+    canonicalEliUri: expression.canonicalEliUri,
+    authorityClass: candidate.authorityClass,
+    nonAuthoritative: candidate.nonAuthoritative,
+    currentnessStatus: candidate.currentnessStatus,
+    sourceDocumentKey: `expression:${expression.sourceExpressionId}`,
+    sourceUpdatedAt,
+    contentHash: null,
+    sourceHtmlUrl: null,
+    sourcePdfUrl: null,
+    sourceUnifiedPdfUrl: null,
+    isCurrent: false,
+  };
+}
+
+function mapCanonicalExpressionResource(expression: DiscoveredOfficialExpression): LegalActResourceDraft {
+  return {
+    sourceTypeCodes: "OFFICIAL_ELI_EXPRESSION",
+    representationType: "eli_expression",
+    fileName: `${expression.sourceExpressionId}.eli`,
+    sourceUrl: expression.canonicalEliUri,
+    contentHash: null,
+  };
+}
+
+export function buildVersionAndResourceDrafts(
+  metadata: EliActMetadata,
+  discoveredExpressions: DiscoveredOfficialExpression[],
+): IngestDraftBundle {
+  const versions: VersionWithResourcesDraft[] = discoveredExpressions.map((expression) => ({
+    version: mapDiscoveredExpressionToVersionDraft(metadata, expression),
+    resources: [mapCanonicalExpressionResource(expression)],
+  }));
+
+  const unresolvedActResources = mapEliMetadataToRawResources(metadata);
+
+  const selection = choosePreferredCurrentExpression(
+    versions.map((entry) => ({
+      sourceExpressionId: entry.version.sourceExpressionId,
+      versionKind: entry.version.versionKind,
+      canonicalEliUri: entry.version.canonicalEliUri,
+      evidence: `official_expression:${entry.version.sourceExpressionId}`,
+    })),
+  );
+
+  // Reachability alone is not enough to claim currentness.
+  for (const entry of versions) {
+    entry.version.isCurrent = false;
+    entry.version.currentnessStatus = "unproven";
+  }
+
+  return {
+    versions,
+    unresolvedActResources,
+    selection,
+  };
 }
 
 function areActFieldsEqual(existing: typeof legalActs.$inferSelect, next: LegalActInsertInput): boolean {
@@ -269,6 +371,12 @@ function areVersionFieldsEqual(
     existing.legalStateDate === next.legalStateDate &&
     existing.effectiveFrom === next.effectiveFrom &&
     existing.effectiveTo === next.effectiveTo &&
+    existing.sourceExpressionId === next.sourceExpressionId &&
+    existing.canonicalEliUri === next.canonicalEliUri &&
+    existing.authorityClass === next.authorityClass &&
+    existing.nonAuthoritative === next.nonAuthoritative &&
+    existing.currentnessStatus === next.currentnessStatus &&
+    existing.sourceDocumentKey === next.sourceDocumentKey &&
     existingSourceUpdatedAt === nextSourceUpdatedAt &&
     existing.contentHash === next.contentHash &&
     existing.sourceHtmlUrl === next.sourceHtmlUrl &&
@@ -278,12 +386,26 @@ function areVersionFieldsEqual(
   );
 }
 
+function areResourceFieldsEqual(
+  existing: typeof legalActResources.$inferSelect,
+  next: LegalActResourceInsertInput,
+): boolean {
+  return (
+    existing.legalActId === next.legalActId &&
+    (existing.legalActVersionId ?? null) === (next.legalActVersionId ?? null) &&
+    existing.sourceTypeCodes === next.sourceTypeCodes &&
+    existing.representationType === next.representationType &&
+    existing.fileName === next.fileName &&
+    existing.sourceUrl === next.sourceUrl &&
+    existing.contentHash === next.contentHash
+  );
+}
+
 export async function ingestEliActMetadata(args: IngestCliArgs, options: IngestOptions = {}) {
   const now = options.now ?? new Date();
   const fetchMetadata = options.fetchMetadata ?? fetchEliActMetadata;
-  const db =
-    options.db ??
-    (await import("../../../db/script-db")).getScriptDb();
+  const discoverExpressions = options.discoverExpressions ?? discoverOfficialExpressions;
+  const db = options.db ?? (await import("../../../db/script-db")).getScriptDb();
 
   const metadata = await fetchMetadata({
     publisher: args.publisher,
@@ -291,9 +413,9 @@ export async function ingestEliActMetadata(args: IngestCliArgs, options: IngestO
     position: args.position,
   });
 
+  const discoveredExpressions = await discoverExpressions(metadata);
+  const drafts = buildVersionAndResourceDrafts(metadata, discoveredExpressions);
   const actData = mapEliMetadataToLegalAct(metadata);
-  const versionData = mapEliMetadataToLegalActVersion(metadata);
-  const resourceData = mapEliMetadataToLegalActResources(metadata);
 
   return db.transaction(async (tx) => {
     const existingAct = (
@@ -328,68 +450,86 @@ export async function ingestEliActMetadata(args: IngestCliArgs, options: IngestO
       actAction = "unchanged";
     }
 
+    const desiredExpressionIds = drafts.versions.map((entry) => entry.version.sourceExpressionId);
+
+    const existingVersions = await tx
+      .select()
+      .from(legalActVersions)
+      .where(eq(legalActVersions.legalActId, legalActId));
+
     const versionCounters = {
       inserted: 0,
       updated: 0,
       unchanged: 0,
     };
 
-    const allVersions = await tx
-      .select()
-      .from(legalActVersions)
-      .where(eq(legalActVersions.legalActId, legalActId));
+    const versionIdByExpressionId = new Map<string, string>();
 
-    const versionsToRemove = allVersions
-      .filter((version) => version.sourceDocumentKey !== UNKNOWN_VERSION_KEY)
-      .map((version) => version.id);
+    for (const draft of drafts.versions) {
+      const expressionId = draft.version.sourceExpressionId;
+      const payload: LegalActVersionInsertInput = {
+        ...draft.version,
+        legalActId,
+      };
 
-    if (versionsToRemove.length > 0) {
-      await tx
-        .delete(legalActVersions)
-        .where(inArray(legalActVersions.id, versionsToRemove));
-    }
+      const existingVersion = existingVersions.find((version) => version.sourceExpressionId === expressionId);
 
-    const existingVersion = (
-      await tx
-        .select()
-        .from(legalActVersions)
-        .where(
-          and(
-            eq(legalActVersions.legalActId, legalActId),
-            eq(legalActVersions.sourceDocumentKey, versionData.sourceDocumentKey),
-          ),
-        )
-        .limit(1)
-    )[0];
+      if (!existingVersion) {
+        const inserted = await tx
+          .insert(legalActVersions)
+          .values(payload)
+          .returning({ id: legalActVersions.id });
+        versionIdByExpressionId.set(expressionId, inserted[0].id);
+        versionCounters.inserted += 1;
+        continue;
+      }
 
-    const versionPayload: LegalActVersionInsertInput = {
-      ...versionData,
-      legalActId,
-    };
+      if (areVersionFieldsEqual(existingVersion, payload)) {
+        versionIdByExpressionId.set(expressionId, existingVersion.id);
+        versionCounters.unchanged += 1;
+        continue;
+      }
 
-    let legalActVersionId: string;
-
-    if (!existingVersion) {
-      const insertedVersion = await tx
-        .insert(legalActVersions)
-        .values(versionPayload)
-        .returning({ id: legalActVersions.id });
-      legalActVersionId = insertedVersion[0].id;
-      versionCounters.inserted += 1;
-    } else if (areVersionFieldsEqual(existingVersion, versionPayload)) {
-      legalActVersionId = existingVersion.id;
-      versionCounters.unchanged += 1;
-    } else {
-      const updatedVersion = await tx
+      const updated = await tx
         .update(legalActVersions)
         .set({
-          ...versionPayload,
+          ...payload,
           updatedAt: now,
         })
         .where(eq(legalActVersions.id, existingVersion.id))
         .returning({ id: legalActVersions.id });
-      legalActVersionId = updatedVersion[0].id;
+
+      versionIdByExpressionId.set(expressionId, updated[0].id);
       versionCounters.updated += 1;
+    }
+
+    const staleVersions = existingVersions
+      .filter((version) => !desiredExpressionIds.includes(version.sourceExpressionId))
+      .map((version) => version.id);
+
+    if (staleVersions.length > 0) {
+      await tx.delete(legalActVersions).where(inArray(legalActVersions.id, staleVersions));
+    }
+
+    const desiredResources: LegalActResourceInsertInput[] = [];
+
+    for (const draft of drafts.versions) {
+      const legalActVersionId = versionIdByExpressionId.get(draft.version.sourceExpressionId) ?? null;
+      for (const resourceDraft of draft.resources) {
+        desiredResources.push({
+          ...resourceDraft,
+          legalActId,
+          legalActVersionId,
+        });
+      }
+    }
+
+    for (const unresolved of drafts.unresolvedActResources) {
+      desiredResources.push({
+        ...unresolved,
+        legalActId,
+        legalActVersionId: null,
+      });
     }
 
     const resourcesCounters = {
@@ -398,24 +538,13 @@ export async function ingestEliActMetadata(args: IngestCliArgs, options: IngestO
       unchanged: 0,
     };
 
-    for (const resource of resourceData) {
-      const existingResource = (
-        await tx
-          .select()
-          .from(legalActResources)
-          .where(
-            and(
-              eq(legalActResources.legalActVersionId, legalActVersionId),
-              eq(legalActResources.sourceUrl, resource.sourceUrl),
-            ),
-          )
-          .limit(1)
-      )[0];
+    const existingResources = await tx
+      .select()
+      .from(legalActResources)
+      .where(eq(legalActResources.legalActId, legalActId));
 
-      const payload: LegalActResourceInsertInput = {
-        ...resource,
-        legalActVersionId,
-      };
+    for (const payload of desiredResources) {
+      const existingResource = existingResources.find((resource) => resource.sourceUrl === payload.sourceUrl);
 
       if (!existingResource) {
         await tx.insert(legalActResources).values(payload);
@@ -423,14 +552,7 @@ export async function ingestEliActMetadata(args: IngestCliArgs, options: IngestO
         continue;
       }
 
-      const resourceUnchanged =
-        existingResource.sourceTypeCodes === payload.sourceTypeCodes &&
-        existingResource.representationType === payload.representationType &&
-        existingResource.fileName === payload.fileName &&
-        existingResource.sourceUrl === payload.sourceUrl &&
-        existingResource.contentHash === payload.contentHash;
-
-      if (resourceUnchanged) {
+      if (areResourceFieldsEqual(existingResource, payload)) {
         resourcesCounters.unchanged += 1;
         continue;
       }
@@ -445,12 +567,37 @@ export async function ingestEliActMetadata(args: IngestCliArgs, options: IngestO
       resourcesCounters.updated += 1;
     }
 
+    const desiredResourceUrls = desiredResources.map((resource) => resource.sourceUrl);
+    if (desiredResourceUrls.length === 0) {
+      await tx.delete(legalActResources).where(eq(legalActResources.legalActId, legalActId));
+    } else {
+      await tx
+        .delete(legalActResources)
+        .where(
+          and(
+            eq(legalActResources.legalActId, legalActId),
+            notInArray(legalActResources.sourceUrl, desiredResourceUrls),
+          ),
+        );
+    }
+
     return {
       sourceId: actData.sourceId,
       title: actData.title,
       actAction,
       versions: versionCounters,
-      resources: resourcesCounters,
+      resources: {
+        ...resourcesCounters,
+        resolvedCount: desiredResources.filter((resource) => resource.legalActVersionId !== null).length,
+        unresolvedCount: desiredResources.filter((resource) => resource.legalActVersionId === null).length,
+      },
+      sourceSelection: {
+        retrievalVersion: drafts.selection.retrievalVersion?.sourceExpressionId ?? null,
+        authoritativeVersion: drafts.selection.authoritativeVersion?.sourceExpressionId ?? null,
+        retrievalReason: drafts.selection.retrievalReason,
+        authorityReason: drafts.selection.authorityReason,
+        warnings: drafts.selection.warnings,
+      },
     } satisfies IngestResult;
   });
 }

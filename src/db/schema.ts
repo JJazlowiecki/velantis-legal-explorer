@@ -53,6 +53,11 @@ export const legalActVersions = pgTable(
 		legalStateDate: date("legal_state_date"),
 		effectiveFrom: date("effective_from"),
 		effectiveTo: date("effective_to"),
+		sourceExpressionId: text("source_expression_id").notNull().default("unknown"),
+		canonicalEliUri: text("canonical_eli_uri"),
+		authorityClass: text("authority_class").notNull().default("unknown"),
+		nonAuthoritative: boolean("non_authoritative").notNull().default(false),
+		currentnessStatus: text("currentness_status").notNull().default("unproven"),
 		sourceDocumentKey: text("source_document_key").notNull(),
 		sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }),
 		fetchedAt: timestamp("fetched_at", { withTimezone: true }).defaultNow().notNull(),
@@ -68,6 +73,10 @@ export const legalActVersions = pgTable(
 		index("legal_act_versions_legal_act_id_idx").on(table.legalActId),
 		index("legal_act_versions_version_kind_idx").on(table.versionKind),
 		index("legal_act_versions_is_current_idx").on(table.isCurrent),
+		uniqueIndex("legal_act_versions_source_expression_uidx").on(
+			table.legalActId,
+			table.sourceExpressionId,
+		),
 		uniqueIndex("legal_act_versions_source_document_uidx").on(
 			table.legalActId,
 			table.sourceDocumentKey,
@@ -79,9 +88,12 @@ export const legalActResources = pgTable(
 	"legal_act_resources",
 	{
 		id: uuid("id").defaultRandom().primaryKey(),
-		legalActVersionId: uuid("legal_act_version_id")
+		legalActId: uuid("legal_act_id")
 			.notNull()
-			.references(() => legalActVersions.id, { onDelete: "cascade" }),
+			.references(() => legalActs.id, { onDelete: "cascade" }),
+		legalActVersionId: uuid("legal_act_version_id").references(() => legalActVersions.id, {
+			onDelete: "set null",
+		}),
 		sourceTypeCodes: text("source_type_codes").notNull(),
 		representationType: text("representation_type").notNull(),
 		fileName: text("file_name").notNull(),
@@ -91,9 +103,10 @@ export const legalActResources = pgTable(
 		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 	},
 	(table) => [
+		index("legal_act_resources_legal_act_id_idx").on(table.legalActId),
 		index("legal_act_resources_legal_act_version_id_idx").on(table.legalActVersionId),
 		index("legal_act_resources_representation_type_idx").on(table.representationType),
-		uniqueIndex("legal_act_resources_source_url_uidx").on(table.legalActVersionId, table.sourceUrl),
+		uniqueIndex("legal_act_resources_source_url_uidx").on(table.legalActId, table.sourceUrl),
 	],
 );
 

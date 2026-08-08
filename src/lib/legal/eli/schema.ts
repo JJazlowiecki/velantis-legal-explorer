@@ -41,6 +41,9 @@ export const eliActMetadataSchema = z.object({
 export type EliActMetadata = z.infer<typeof eliActMetadataSchema>;
 
 export type LegalActVersionKind = "promulgated" | "consolidated" | "unified" | "unknown";
+export type OfficialEliExpressionId = "ogl" | "tj" | "uj";
+export type ExpressionAuthorityClass = "authoritative" | "non_authoritative" | "unknown";
+export type CurrentnessStatus = "proven_current" | "unproven";
 
 export function parseEliActMetadata(input: unknown): EliActMetadata {
   return eliActMetadataSchema.parse(input);

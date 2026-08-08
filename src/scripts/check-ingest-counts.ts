@@ -1,5 +1,5 @@
 import { config as loadEnv } from "dotenv";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
@@ -37,26 +37,31 @@ async function main() {
         .where(eq(schema.legalActVersions.legalActId, act.id))
     : [{ count: 0 }];
 
-  const version = act
-    ? (
-        await db
-          .select({ id: schema.legalActVersions.id })
-          .from(schema.legalActVersions)
-          .where(eq(schema.legalActVersions.legalActId, act.id))
-          .limit(1)
-      )[0]
-    : undefined;
-
-  const resources = version
+  const resolvedResources = act
     ? await db
         .select({ count: sql<number>`count(*)::int` })
         .from(schema.legalActResources)
-        .where(eq(schema.legalActResources.legalActVersionId, version.id))
+        .where(
+          and(
+            eq(schema.legalActResources.legalActId, act.id),
+            isNotNull(schema.legalActResources.legalActVersionId),
+          ),
+        )
+    : [{ count: 0 }];
+
+  const unresolvedResources = act
+    ? await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(schema.legalActResources)
+        .where(
+          and(eq(schema.legalActResources.legalActId, act.id), isNull(schema.legalActResources.legalActVersionId)),
+        )
     : [{ count: 0 }];
 
   console.log(`legal_acts_du_1964_93=${acts[0].count}`);
-  console.log(`legal_act_versions_for_du_1964_93=${versions[0].count}`);
-  console.log(`legal_act_resources_for_du_1964_93=${resources[0].count}`);
+  console.log(`real_legal_versions_for_du_1964_93=${versions[0].count}`);
+  console.log(`resolved_resources_for_du_1964_93=${resolvedResources[0].count}`);
+  console.log(`unresolved_resources_for_du_1964_93=${unresolvedResources[0].count}`);
 
   await client.end({ timeout: 1 });
 }

@@ -29,6 +29,20 @@
       "when": 1786204256205,
       "tag": "0003_clear_salo",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786208144153,
+      "tag": "0004_sturdy_iron_lad",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786209298254,
+      "tag": "0005_empty_the_hunter",
+      "breakpoints": true
     }
   ]
 }

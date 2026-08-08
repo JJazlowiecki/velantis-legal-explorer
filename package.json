@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "ingest:eli": "tsx src/scripts/ingest-eli.ts",
+    "diagnose:eli-source": "tsx src/scripts/diagnose-eli-source.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio"
