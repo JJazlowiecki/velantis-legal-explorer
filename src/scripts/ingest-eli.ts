@@ -1,3 +1,4 @@
+import { closeScriptDb } from "../db/script-db";
 import { EliClientError } from "../lib/legal/eli/client";
 import { CliValidationError, ingestEliActMetadata, parseIngestCliArgs } from "../lib/legal/eli/ingest";
 
@@ -37,24 +38,26 @@ async function main() {
   }
 }
 
-main().catch((error: unknown) => {
-  if (error instanceof CliValidationError) {
-    printUsage();
-    console.error(`Argument error: ${error.message}`);
-    process.exitCode = 1;
-    return;
-  }
+main()
+  .catch((error: unknown) => {
+    if (error instanceof CliValidationError) {
+      printUsage();
+      console.error(`Argument error: ${error.message}`);
+      process.exitCode = 1;
+      return;
+    }
 
-  if (error instanceof EliClientError) {
-    console.error(`ELI request failed: ${error.message}`);
-    process.exitCode = 1;
-    return;
-  }
+    if (error instanceof EliClientError) {
+      console.error(`ELI request failed: ${error.message}`);
+      process.exitCode = 1;
+      return;
+    }
 
-  if (error instanceof Error) {
-    console.error(`ELI ingest failed: ${error.message}`);
-  } else {
-    console.error("ELI ingest failed");
-  }
-  process.exitCode = 1;
-});
+    if (error instanceof Error) {
+      console.error(`ELI ingest failed: ${error.message}`);
+    } else {
+      console.error("ELI ingest failed");
+    }
+    process.exitCode = 1;
+  })
+  .finally(() => closeScriptDb());

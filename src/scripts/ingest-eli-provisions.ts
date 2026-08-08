@@ -1,3 +1,4 @@
+import { closeScriptDb } from "../db/script-db";
 import { EliClientError } from "../lib/legal/eli/client";
 import {
   ingestEliProvisions,
@@ -40,25 +41,27 @@ async function main() {
   }
 }
 
-main().catch((error: unknown) => {
-  if (error instanceof ProvisionIngestError) {
-    printUsage();
-    console.error(`Provision ingest error: ${error.message}`);
+main()
+  .catch((error: unknown) => {
+    if (error instanceof ProvisionIngestError) {
+      printUsage();
+      console.error(`Provision ingest error: ${error.message}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    if (error instanceof EliClientError) {
+      console.error(`ELI request failed: ${error.message}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    if (error instanceof Error) {
+      console.error(`ELI provision ingest failed: ${error.message}`);
+    } else {
+      console.error("ELI provision ingest failed");
+    }
+
     process.exitCode = 1;
-    return;
-  }
-
-  if (error instanceof EliClientError) {
-    console.error(`ELI request failed: ${error.message}`);
-    process.exitCode = 1;
-    return;
-  }
-
-  if (error instanceof Error) {
-    console.error(`ELI provision ingest failed: ${error.message}`);
-  } else {
-    console.error("ELI provision ingest failed");
-  }
-
-  process.exitCode = 1;
-});
+  })
+  .finally(() => closeScriptDb());
