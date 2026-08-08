@@ -38,3 +38,17 @@ pnpm db:generate
 pnpm db:migrate
 pnpm db:studio
 ```
+
+## First ELI Metadata Ingestion
+
+```bash
+docker compose up -d
+pnpm db:migrate
+pnpm ingest:eli --publisher DU --year 1964 --position 93
+```
+
+Optional database inspection:
+
+```bash
+pnpm db:studio
+```

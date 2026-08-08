@@ -1,0 +1,23 @@
+{
+  "publisher": "DU",
+  "year": 1964,
+  "pos": 93,
+  "title": "Ustawa z dnia 23 kwietnia 1964 r. - Kodeks cywilny.",
+  "type": "Ustawa",
+  "announcementDate": "1964-04-23",
+  "promulgation": "1964-05-18",
+  "entryIntoForce": "1965-01-01",
+  "validFrom": "1965-01-01",
+  "changeDate": "2026-06-25T09:52:09",
+  "status": "akt posiada tekst jednolity",
+  "inForce": "IN_FORCE",
+  "ELI": "DU/1964/93",
+  "textHTML": true,
+  "textPDF": true,
+  "texts": [
+    { "fileName": "text.html", "type": "H" },
+    { "fileName": "D19640093.pdf", "type": "O" },
+    { "fileName": "D19640093.pdf", "type": "I" },
+    { "fileName": "D19640093Lj.pdf", "type": "U" }
+  ]
+}
