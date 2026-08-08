@@ -1,0 +1,83 @@
+[
+  {
+    "id": "part_1",
+    "type": "part",
+    "title": "Treść ustawy",
+    "children": [
+      {
+        "id": "book_1",
+        "type": "book",
+        "name": "pierwsza",
+        "title": "Księga pierwsza",
+        "children": [
+          {
+            "id": "titl_I",
+            "type": "titl",
+            "name": "I",
+            "title": "Tytuł I - Przepisy ogólne",
+            "children": [
+              {
+                "id": "arti_1",
+                "type": "arti",
+                "name": "1",
+                "title": "Art. 1.",
+                "children": [
+                  {
+                    "id": "para_1",
+                    "type": "para",
+                    "name": "1",
+                    "title": "§ 1.",
+                    "children": [
+                      {
+                        "id": "pint_1",
+                        "type": "pint",
+                        "name": "3",
+                        "title": "3)"
+                      },
+                      {
+                        "id": "litr_a",
+                        "type": "litr",
+                        "name": "a",
+                        "title": "a)"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "arti_5",
+                "type": "arti",
+                "name": "5",
+                "title": "Art. 5."
+              },
+              {
+                "id": "arti_471",
+                "type": "arti",
+                "name": "471",
+                "title": "Art. 471."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "attach_1",
+    "type": "appendix",
+    "title": "Załącznik nr 1 - Tekst jednolity",
+    "children": [
+      {
+        "id": "attach_arti_1",
+        "type": "arti",
+        "name": "1",
+        "title": "Art. 1."
+      }
+    ]
+  },
+  {
+    "id": "misc_unknown",
+    "type": "myst",
+    "title": "Nieznana jednostka"
+  }
+]

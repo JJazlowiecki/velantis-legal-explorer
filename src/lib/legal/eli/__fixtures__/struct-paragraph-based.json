@@ -1,0 +1,31 @@
+[
+  {
+    "id": "chapter_1",
+    "type": "chpt",
+    "title": "Rozdział I",
+    "children": [
+      {
+        "id": "para_4",
+        "type": "para",
+        "name": "4",
+        "title": "§ 4",
+        "children": [
+          {
+            "id": "ust_2",
+            "type": "ustp",
+            "name": "2",
+            "title": "ust. 2",
+            "children": [
+              {
+                "id": "pkt_3",
+                "type": "pint",
+                "name": "3",
+                "title": "pkt 3"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]

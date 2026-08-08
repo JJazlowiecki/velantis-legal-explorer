@@ -10,13 +10,16 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "ingest:eli": "tsx src/scripts/ingest-eli.ts",
+    "ingest:eli-provisions": "tsx src/scripts/ingest-eli-provisions.ts",
     "diagnose:eli-source": "tsx src/scripts/diagnose-eli-source.ts",
+    "diagnose:eli-provisions": "tsx src/scripts/diagnose-eli-provisions.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
+    "cheerio": "^1.2.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",

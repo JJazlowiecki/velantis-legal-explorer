@@ -30,6 +30,7 @@ export const eliActMetadataSchema = z.object({
   entryIntoForce: dateString.optional(),
   validFrom: dateString.optional(),
   changeDate: dateTimeString.optional(),
+  legalStatusDate: dateString.optional(),
   status: z.string().optional(),
   inForce: z.union([z.string(), z.boolean()]).optional(),
   ELI: z.string().optional(),
@@ -40,6 +41,31 @@ export const eliActMetadataSchema = z.object({
 
 export type EliActMetadata = z.infer<typeof eliActMetadataSchema>;
 
+export interface EliStructNode {
+  id: string;
+  symbol?: string;
+  type?: string;
+  name?: string;
+  title?: string;
+  children?: EliStructNode[];
+}
+
+export const eliStructNodeSchema: z.ZodType<EliStructNode> = z.lazy(() =>
+  z
+    .object({
+      id: z.string().min(1),
+      symbol: z.string().min(1).optional(),
+      type: z.string().min(1).optional(),
+      name: z.string().min(1).optional(),
+      title: z.string().min(1).optional(),
+      children: z.array(eliStructNodeSchema).optional(),
+    })
+    .passthrough(),
+);
+
+export const eliStructResponseSchema = z.array(eliStructNodeSchema);
+export type EliStructResponse = z.infer<typeof eliStructResponseSchema>;
+
 export type LegalActVersionKind = "promulgated" | "consolidated" | "unified" | "unknown";
 export type OfficialEliExpressionId = "ogl" | "tj" | "uj";
 export type ExpressionAuthorityClass = "authoritative" | "non_authoritative" | "unknown";
@@ -47,4 +73,8 @@ export type CurrentnessStatus = "proven_current" | "unproven";
 
 export function parseEliActMetadata(input: unknown): EliActMetadata {
   return eliActMetadataSchema.parse(input);
+}
+
+export function parseEliActStruct(input: unknown): EliStructResponse {
+  return eliStructResponseSchema.parse(input);
 }
