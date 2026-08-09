@@ -237,6 +237,9 @@ export function LegalActDetailContent({ act, initialVersionId, initialStructure,
           text: provision.text,
           isNonAuthoritative: selectedVersion.nonAuthoritative,
           isCurrentnessUnproven: selectedVersion.currentnessStatus !== "proven_current",
+          // The Legal Acts browser has no corpus-run context (it's not an Explorer search
+          // result) — never claim a provision is confirmed current here.
+          provenCurrentAsOf: null,
         }
       : null;
 

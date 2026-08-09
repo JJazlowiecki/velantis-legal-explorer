@@ -10,7 +10,7 @@ const validAnswer = {
   alternativePaths: [],
   uncertainties: ["Aktualność nie została potwierdzona."],
   citedSources: [
-    { actTitle: "Ustawa testowa", citationLabel: "art. 471", text: "Treść.", isNonAuthoritative: false, isCurrentnessUnproven: true },
+    { actTitle: "Ustawa testowa", citationLabel: "art. 471", text: "Treść.", isNonAuthoritative: false, isCurrentnessUnproven: true, provenCurrentAsOf: null },
   ],
   clarificationQuestion: null,
 };
@@ -23,6 +23,7 @@ const validProvision = {
   text: "Treść przepisu.",
   isNonAuthoritative: false,
   isCurrentnessUnproven: true,
+  provenCurrentAsOf: null,
 };
 
 describe("parseSavedSnapshot", () => {

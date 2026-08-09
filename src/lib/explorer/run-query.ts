@@ -57,10 +57,18 @@ export async function runExplorerQuery(rawQuery: unknown, deps: RunExplorerQuery
   try {
     corpus = await deps.getCorpus();
 
+    // corpusRunId non-null <=> Explorer resolved a CURRENT-mode corpus for this query — every
+    // id in corpus.legalActVersionIds is then an authoritative_current entry of that one
+    // pinned run (see resolveCurrentCorpus), so it's safe to pass the whole scope through as
+    // the "confirmed current as of effectiveAsOf" context. Omitted entirely in test mode.
     result = await deps.answerLegalProblem({
       problemDescription: validation.query,
       legalActVersionIds: corpus.legalActVersionIds,
       db: deps.getDb(),
+      currentCorpusContext:
+        corpus.corpusRunId && corpus.effectiveAsOf
+          ? { legalActVersionIds: corpus.legalActVersionIds, effectiveAsOf: corpus.effectiveAsOf }
+          : undefined,
     });
   } catch (error) {
     console.error(

@@ -35,7 +35,7 @@ function snapshot(overrides: Partial<ExplorerHistorySnapshot> = {}): ExplorerHis
     alternativePaths: [],
     uncertainties: [],
     citedSources: [
-      { actTitle: "Ustawa testowa", citationLabel: "art. 1", text: "Treść.", isNonAuthoritative: false, isCurrentnessUnproven: true },
+      { actTitle: "Ustawa testowa", citationLabel: "art. 1", text: "Treść.", isNonAuthoritative: false, isCurrentnessUnproven: true, provenCurrentAsOf: null },
     ],
     clarificationQuestion: null,
     ...overrides,

@@ -389,6 +389,7 @@ describeDatabase("Save-provision integration (reuses the existing Saved service)
       text: detail.text,
       isNonAuthoritative: false,
       isCurrentnessUnproven: true,
+      provenCurrentAsOf: null,
     };
 
     const result = await createSavedItem({

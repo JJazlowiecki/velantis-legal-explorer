@@ -12,11 +12,29 @@ export interface PackedSource {
   versionKind: string;
   authorityClass: string;
   currentnessStatus: string;
+  /**
+   * Non-null ONLY when this source's legalActVersionId is a member of the CURRENT-mode corpus
+   * run resolved for this exact query (see AnswerLegalProblemOptions.currentCorpusContext) —
+   * carries that run's effectiveAsOf date. Currentness is a corpus-run+effectiveAsOf-relative
+   * fact, never an immutable-version property: legal_act_versions.currentnessStatus is never
+   * read here and never mutated anywhere. Null in historical/test mode, or when the source
+   * simply isn't part of the current-corpus context passed for this query (e.g. a different
+   * run, or no run at all).
+   */
+  provenCurrentAsOf: string | null;
   sourceExpressionId: string;
+}
+
+export interface CurrentCorpusPackingContext {
+  /** The exact set of legalActVersionIds INCLUDED (authoritative_current) in one pinned corpus run. */
+  legalActVersionIds: string[];
+  effectiveAsOf: string;
 }
 
 export interface PackSourcesOptions {
   maxSources?: number;
+  /** Omit entirely for historical/test mode — no source is ever treated as proven-current then. */
+  currentCorpusContext?: CurrentCorpusPackingContext;
 }
 
 const DEFAULT_MAX_SOURCES = 12;
@@ -33,6 +51,10 @@ export function packSources(
   options: PackSourcesOptions = {},
 ): PackedSource[] {
   const maxSources = options.maxSources ?? DEFAULT_MAX_SOURCES;
+  const currentVersionIds = options.currentCorpusContext
+    ? new Set(options.currentCorpusContext.legalActVersionIds)
+    : null;
+  const currentEffectiveAsOf = options.currentCorpusContext?.effectiveAsOf ?? null;
 
   const byProvisionId = new Map<string, DeduplicatedRetrievedProvision>();
   for (const provision of provisions) {
@@ -72,6 +94,8 @@ export function packSources(
     versionKind: provision.versionKind,
     authorityClass: provision.authorityClass,
     currentnessStatus: provision.currentnessStatus,
+    provenCurrentAsOf:
+      currentVersionIds && currentVersionIds.has(provision.legalActVersionId) ? currentEffectiveAsOf : null,
     sourceExpressionId: provision.sourceExpressionId,
   }));
 }

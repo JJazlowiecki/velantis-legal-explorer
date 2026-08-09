@@ -14,6 +14,13 @@ export const explorerHistoryCitedSourceSchema = z.object({
   text: z.string(),
   isNonAuthoritative: z.boolean(),
   isCurrentnessUnproven: z.boolean(),
+  // Optional for backward compatibility with entries persisted before current-corpus
+  // provenance existed — missing/omitted is treated the same as null (never proven current).
+  provenCurrentAsOf: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
 });
 
 export const explorerHistoryConclusionSchema = z.object({

@@ -117,4 +117,25 @@ describe("packSources", () => {
   it("returns an empty array for no provisions", () => {
     expect(packSources([])).toEqual([]);
   });
+
+  describe("provenCurrentAsOf (current-law-corpus provenance)", () => {
+    it("is null when no currentCorpusContext is supplied (historical/test mode)", () => {
+      const packed = packSources([provision({ legalActVersionId: "v1" })]);
+      expect(packed[0].provenCurrentAsOf).toBeNull();
+    });
+
+    it("is set to the run's effectiveAsOf when the source's version is a member of the supplied current corpus", () => {
+      const packed = packSources([provision({ legalActVersionId: "v1" })], {
+        currentCorpusContext: { legalActVersionIds: ["v1", "v2"], effectiveAsOf: "2026-08-09" },
+      });
+      expect(packed[0].provenCurrentAsOf).toBe("2026-08-09");
+    });
+
+    it("stays null for a version NOT in the supplied current corpus, even when a context is passed (a different run's provenance can never apply accidentally)", () => {
+      const packed = packSources([provision({ legalActVersionId: "v-outside-run" })], {
+        currentCorpusContext: { legalActVersionIds: ["v1", "v2"], effectiveAsOf: "2026-08-09" },
+      });
+      expect(packed[0].provenCurrentAsOf).toBeNull();
+    });
+  });
 });

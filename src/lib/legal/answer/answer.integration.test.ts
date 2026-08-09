@@ -322,6 +322,76 @@ describeDatabase("answerLegalProblem", () => {
     });
   });
 
+  describe("currentness provenance (current-law-corpus mode)", () => {
+    const issueForAlpha = [
+      {
+        label: "nienależyte wykonanie zobowiązania",
+        likelihood: "most_likely" as const,
+        rationale: "rationale",
+        retrievalQueries: ["KEYWORD_ALPHA"],
+      },
+    ];
+
+    it("without a currentCorpusContext, the same immutable version remains unproven (caveat present, provenCurrentAsOf null)", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const result = await answerLegalProblem({
+        problemDescription: "firma remontowa źle zrobiła remont i nie chce oddać pieniędzy",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(issueForAlpha),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
+      });
+
+      expect(result.conclusions[0].support[0].provenCurrentAsOf).toBeNull();
+      expect(result.uncertainties.some((u) => u.includes("Aktualność"))).toBe(true);
+    });
+
+    it("when the version is a member of the resolved current corpus, it is treated as current AS OF that run's effectiveAsOf (no caveat, provenCurrentAsOf set)", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const result = await answerLegalProblem({
+        problemDescription: "firma remontowa źle zrobiła remont i nie chce oddać pieniędzy",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(issueForAlpha),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
+        currentCorpusContext: { legalActVersionIds: [currentVersion.id], effectiveAsOf: "2026-08-09" },
+      });
+
+      expect(result.conclusions[0].support[0].provenCurrentAsOf).toBe("2026-08-09");
+      expect(result.uncertainties.some((u) => u.includes("Aktualność"))).toBe(false);
+    });
+
+    it("a current-corpus context for a DIFFERENT version id cannot accidentally apply to this source", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const result = await answerLegalProblem({
+        problemDescription: "firma remontowa źle zrobiła remont i nie chce oddać pieniędzy",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(issueForAlpha),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
+        currentCorpusContext: { legalActVersionIds: ["some-other-run-version-id"], effectiveAsOf: "2026-08-09" },
+      });
+
+      expect(result.conclusions[0].support[0].provenCurrentAsOf).toBeNull();
+      expect(result.uncertainties.some((u) => u.includes("Aktualność"))).toBe(true);
+    });
+  });
+
   it("supports multiple conclusions backed by different provisions", async () => {
     const { currentVersion, alpha, beta } = await seedFixture();
     if (!db) throw new Error("unreachable");

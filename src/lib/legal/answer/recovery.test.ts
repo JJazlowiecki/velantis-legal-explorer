@@ -28,6 +28,7 @@ const source: PackedSource = {
   versionKind: "promulgated",
   authorityClass: "authoritative",
   currentnessStatus: "unproven",
+  provenCurrentAsOf: null,
   sourceExpressionId: "ogl",
 };
 

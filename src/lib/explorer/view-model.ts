@@ -12,6 +12,8 @@ export interface ExplorerCitedSource {
   text: string;
   isNonAuthoritative: boolean;
   isCurrentnessUnproven: boolean;
+  /** Set only when this citation was confirmed authoritative_current by a pinned current-law-corpus run — the run's effectiveAsOf date. Null in historical/test mode or when not covered. */
+  provenCurrentAsOf: string | null;
 }
 
 export interface ExplorerConclusionView {
@@ -54,7 +56,8 @@ function selectCitedSources(result: LegalAnswerResult): ExplorerCitedSource[] {
       citationLabel: source.citationLabel,
       text: source.text,
       isNonAuthoritative: source.authorityClass === "non_authoritative",
-      isCurrentnessUnproven: source.currentnessStatus !== "proven_current",
+      isCurrentnessUnproven: source.provenCurrentAsOf === null,
+      provenCurrentAsOf: source.provenCurrentAsOf,
     }));
 }
 
