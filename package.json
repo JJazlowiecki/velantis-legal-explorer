@@ -14,6 +14,7 @@
     "index:legal-search": "tsx src/scripts/index-legal-search.ts",
     "search:legal": "tsx src/scripts/search-legal.ts",
     "diagnose:legal-issues": "tsx src/scripts/diagnose-legal-issues.ts",
+    "answer:legal": "tsx src/scripts/answer-legal.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio"
