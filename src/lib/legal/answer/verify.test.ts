@@ -29,8 +29,17 @@ const baseInput = {
   conclusions: [conclusion],
 };
 
-const supportedPayload = {
-  results: [{ conclusionIndex: 0, supported: true, reason: "Źródło wprost stanowi podstawę.", supportingSourceIds: ["SOURCE_1"] }],
+// Strict Structured Outputs response shape: a required, keyed `result_<conclusionIndex>`
+// property per conclusion — NOT an array — so OpenAI's constrained decoding cannot omit one
+// (see buildStrictVerificationJsonSchema in verify.ts for why). verify.ts reshapes this back
+// into the `{results: [{conclusionIndex, ...}]}` array before Zod validation and before
+// returning to callers, so `verifyConclusionSupport`'s return type is unaffected by this.
+const directSupportPayload = {
+  result_0: {
+    verdict: "direct_support",
+    reason: "Źródło wprost stanowi podstawę.",
+    evidence: [{ sourceId: "SOURCE_1", excerpt: "Dłużnik obowiązany jest do naprawienia szkody." }],
+  },
 };
 
 describe("verifyConclusionSupport", () => {
@@ -50,29 +59,42 @@ describe("verifyConclusionSupport", () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("parses a valid supported verification result", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(withContent(supportedPayload));
+  it("parses a valid direct_support verification result with evidence", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(withContent(directSupportPayload));
     const result = await verifyConclusionSupport(baseInput, { apiKey: "test-key", fetchImpl });
 
     expect(result).toHaveLength(1);
-    expect(result[0]).toMatchObject({ conclusionIndex: 0, supported: true, supportingSourceIds: ["SOURCE_1"] });
+    expect(result[0]).toMatchObject({
+      conclusionIndex: 0,
+      verdict: "direct_support",
+      evidence: [{ sourceId: "SOURCE_1", excerpt: "Dłużnik obowiązany jest do naprawienia szkody." }],
+    });
   });
 
-  it("parses a valid unsupported verification result", async () => {
+  it("parses a valid no_support verification result with empty evidence", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       withContent({
-        results: [
-          { conclusionIndex: 0, supported: false, reason: "Źródło dotyczy innej instytucji prawnej.", supportingSourceIds: [] },
-        ],
+        result_0: { verdict: "no_support", reason: "Źródło dotyczy innej instytucji prawnej.", evidence: [] },
       }),
     );
     const result = await verifyConclusionSupport(baseInput, { apiKey: "test-key", fetchImpl });
 
-    expect(result[0]).toMatchObject({ supported: false, supportingSourceIds: [] });
+    expect(result[0]).toMatchObject({ verdict: "no_support", evidence: [] });
+  });
+
+  it("parses a valid partial_support verification result", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      withContent({
+        result_0: { verdict: "partial_support", reason: "Źródło potwierdza tylko część szerszej tezy.", evidence: [] },
+      }),
+    );
+    const result = await verifyConclusionSupport(baseInput, { apiKey: "test-key", fetchImpl });
+
+    expect(result[0]).toMatchObject({ verdict: "partial_support", evidence: [] });
   });
 
   it("never logs the API key in the request", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(withContent(supportedPayload));
+    const fetchImpl = vi.fn().mockResolvedValue(withContent(directSupportPayload));
     await verifyConclusionSupport(baseInput, { apiKey: "super-secret-key", fetchImpl });
 
     const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
@@ -82,7 +104,7 @@ describe("verifyConclusionSupport", () => {
   });
 
   it("only sends the sources claimed by each conclusion, not unrelated retrieved sources", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(withContent(supportedPayload));
+    const fetchImpl = vi.fn().mockResolvedValue(withContent(directSupportPayload));
     await verifyConclusionSupport(baseInput, { apiKey: "test-key", fetchImpl });
 
     const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
@@ -90,10 +112,87 @@ describe("verifyConclusionSupport", () => {
     expect(String(init.body)).not.toContain("SOURCE_2");
   });
 
-  it("rejects a response referencing an unknown/fabricated SOURCE_X for a conclusion", async () => {
+  it("D: uses strict json_schema Structured Outputs with a required result_<index> key per conclusion (not an array), so the model cannot omit one", async () => {
+    const multiInput = {
+      problemDescription: "problem",
+      conclusions: [
+        conclusion,
+        {
+          conclusionIndex: 3,
+          statement: "Kupujący może żądać usunięcia wady.",
+          sources: [{ sourceId: "SOURCE_2", citationLabel: "art. 556", text: "Art. 556. Rękojmia za wady." }],
+        },
+      ],
+    };
     const fetchImpl = vi.fn().mockResolvedValue(
       withContent({
-        results: [{ conclusionIndex: 0, supported: true, reason: "reason", supportingSourceIds: ["SOURCE_99"] }],
+        result_0: { verdict: "direct_support", reason: "ok", evidence: [{ sourceId: "SOURCE_1", excerpt: "x" }] },
+        result_3: { verdict: "no_support", reason: "no", evidence: [] },
+      }),
+    );
+    await verifyConclusionSupport(multiInput, { apiKey: "test-key", fetchImpl });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+
+    expect(body.response_format.type).toBe("json_schema");
+    expect(body.response_format.json_schema.strict).toBe(true);
+
+    const schema = body.response_format.json_schema.schema;
+    expect(schema.type).toBe("object");
+    expect(schema.additionalProperties).toBe(false);
+    // required keys are exactly result_0 and result_3 — no array, no omittable count
+    expect(schema.required).toEqual(["result_0", "result_3"]);
+    expect(Object.keys(schema.properties)).toEqual(["result_0", "result_3"]);
+    expect(schema.properties.result_0.additionalProperties).toBe(false);
+    expect(schema.properties.result_0.required).toEqual(["verdict", "reason", "evidence"]);
+
+    const verdictEnum = schema.properties.result_0.properties.verdict.enum;
+    expect(verdictEnum).toEqual(["direct_support", "partial_support", "no_support"]);
+
+    const sourceEnum = schema.properties.result_0.properties.evidence.items.properties.sourceId.enum;
+    expect(sourceEnum).toEqual(["SOURCE_1", "SOURCE_2"]);
+  });
+
+  it("E: application-level validation still rejects a response missing a required conclusion result, even under strict Structured Outputs", async () => {
+    const multiInput = {
+      problemDescription: "problem",
+      conclusions: [
+        conclusion,
+        {
+          conclusionIndex: 1,
+          statement: "Kupujący może żądać usunięcia wady.",
+          sources: [{ sourceId: "SOURCE_2", citationLabel: "art. 556", text: "Art. 556. Rękojmia za wady." }],
+        },
+      ],
+    };
+    // Only one of the two required result_<index> keys is present — simulates a model that
+    // (despite strict mode) returns a malformed/incomplete payload; Zod is the final backstop.
+    const fetchImpl = vi.fn().mockResolvedValue(
+      withContent({
+        result_0: { verdict: "direct_support", reason: "ok", evidence: [{ sourceId: "SOURCE_1", excerpt: "x" }] },
+      }),
+    );
+
+    await expect(
+      verifyConclusionSupport(multiInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("H: fails closed when the model refuses to produce a structured response", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      chatResponse(200, { choices: [{ message: { content: null, refusal: "cannot comply" }, finish_reason: "stop" }] }),
+    );
+
+    await expect(
+      verifyConclusionSupport(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("H: fails closed when the response is truncated (finish_reason=length)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      chatResponse(200, {
+        choices: [{ message: { content: JSON.stringify(directSupportPayload) }, finish_reason: "length" }],
       }),
     );
 
@@ -102,9 +201,31 @@ describe("verifyConclusionSupport", () => {
     ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
-  it("rejects supported=true with empty supportingSourceIds", async () => {
+  it("rejects a response referencing an unknown/fabricated SOURCE_X for a conclusion", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
-      withContent({ results: [{ conclusionIndex: 0, supported: true, reason: "reason", supportingSourceIds: [] }] }),
+      withContent({
+        result_0: { verdict: "direct_support", reason: "reason", evidence: [{ sourceId: "SOURCE_99", excerpt: "cokolwiek" }] },
+      }),
+    );
+
+    await expect(
+      verifyConclusionSupport(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("rejects verdict=direct_support with empty evidence", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      withContent({ result_0: { verdict: "direct_support", reason: "reason", evidence: [] } }),
+    );
+
+    await expect(
+      verifyConclusionSupport(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("rejects an unknown verdict value", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      withContent({ result_0: { verdict: "mostly_supported", reason: "reason", evidence: [] } }),
     );
 
     await expect(
@@ -113,7 +234,7 @@ describe("verifyConclusionSupport", () => {
   });
 
   it("rejects a response missing a result for a supplied conclusionIndex", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(withContent({ results: [] }));
+    const fetchImpl = vi.fn().mockResolvedValue(withContent({}));
 
     await expect(
       verifyConclusionSupport(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
@@ -146,7 +267,7 @@ describe("verifyConclusionSupport", () => {
       const fetchImpl = vi
         .fn()
         .mockResolvedValueOnce(chatResponse(503, { error: "unavailable" }))
-        .mockResolvedValueOnce(withContent(supportedPayload));
+        .mockResolvedValueOnce(withContent(directSupportPayload));
 
       const resultPromise = verifyConclusionSupport(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 2 });
       await vi.runAllTimersAsync();
@@ -188,17 +309,19 @@ describe("verifyConclusionSupport", () => {
     };
     const fetchImpl = vi.fn().mockResolvedValue(
       withContent({
-        results: [
-          { conclusionIndex: 0, supported: true, reason: "ok", supportingSourceIds: ["SOURCE_1"] },
-          { conclusionIndex: 1, supported: false, reason: "nie dotyczy", supportingSourceIds: [] },
-        ],
+        result_0: {
+          verdict: "direct_support",
+          reason: "ok",
+          evidence: [{ sourceId: "SOURCE_1", excerpt: "Dłużnik obowiązany jest do naprawienia szkody." }],
+        },
+        result_1: { verdict: "no_support", reason: "nie dotyczy", evidence: [] },
       }),
     );
 
     const result = await verifyConclusionSupport(multiInput, { apiKey: "test-key", fetchImpl });
     expect(result).toHaveLength(2);
-    expect(result.find((r) => r.conclusionIndex === 0)?.supported).toBe(true);
-    expect(result.find((r) => r.conclusionIndex === 1)?.supported).toBe(false);
+    expect(result.find((r) => r.conclusionIndex === 0)?.verdict).toBe("direct_support");
+    expect(result.find((r) => r.conclusionIndex === 1)?.verdict).toBe("no_support");
   });
 });
 

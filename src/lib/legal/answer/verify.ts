@@ -9,7 +9,8 @@ const chatCompletionEnvelopeSchema = z.object({
   choices: z
     .array(
       z.object({
-        message: z.object({ content: z.string().nullable() }),
+        message: z.object({ content: z.string().nullable(), refusal: z.string().nullable().optional() }),
+        finish_reason: z.string().nullable().optional(),
       }),
     )
     .min(1),
@@ -37,26 +38,36 @@ export class ConclusionVerificationError extends Error {
  * It must not fall back to general legal knowledge to "rescue" a plausible-sounding claim,
  * and it must not receive any source the generator did not itself claim as support for that
  * specific conclusion (no unrelated retrieved evidence, no rescuing from other sources).
+ *
+ * This is stage 1 of 2 (see skeptic.ts for stage 2). Stage 1 requires a tri-state verdict
+ * plus verbatim supporting excerpts; application code independently re-checks every excerpt
+ * against the actual source text (see evidence.ts) — the model's claim of "direct_support"
+ * is never trusted on its own.
  */
-const SYSTEM_PROMPT = `Jesteś wyspecjalizowanym weryfikatorem. Twoim JEDYNYM zadaniem jest sprawdzenie, czy dokładnie wskazane fragmenty przepisów SUBSTANTYWNIE potwierdzają dokładnie sformułowane twierdzenie prawne — nic więcej.
+const SYSTEM_PROMPT = `Jesteś wyspecjalizowanym weryfikatorem prawnym. Twoim JEDYNYM zadaniem jest sprawdzenie, czy dokładnie wskazane fragmenty przepisów SUBSTANTYWNIE i BEZPOŚREDNIO potwierdzają dokładnie sformułowane twierdzenie prawne — nic więcej.
 
 Dla każdego wniosku z listy "WNIOSKI DO WERYFIKACJI" otrzymasz: jego indeks (conclusionIndex), dokładną treść twierdzenia (statement) oraz WYŁĄCZNIE te źródła (SOURCE_X), które zostały wskazane jako podstawa TEGO KONKRETNEGO twierdzenia. Inne, niepowiązane źródła nie są Ci udostępnione — nie zakładaj ich istnienia i nie szukaj wsparcia poza tym, co dostałeś.
 
-PYTANIE, na które odpowiadasz dla każdego wniosku (i wyłącznie na nie):
-"Czy dostarczona treść źródła (źródeł) SUBSTANTYWNIE potwierdza dokładnie to twierdzenie prawne?"
+DWA RÓŻNE PYTANIA — odpowiadasz WYŁĄCZNIE na drugie:
+1. "Czy to twierdzenie jest ogólnie prawdziwe w polskim prawie?" — TO PYTANIE JEST NIEISTOTNE. Nie oceniaj tego. Twierdzenie może być ogólnie prawdziwe w oderwaniu od sprawy, a mimo to dostarczone źródło go NIE ustanawia.
+2. "Czy TA KONKRETNA dostarczona treść źródła USTANAWIA/POTWIERDZA TO KONKRETNE twierdzenie?" — to jedyne pytanie, na które odpowiadasz.
+
+Dla każdego wniosku przypisz jeden werdykt (verdict):
+- "direct_support": treść źródła wprost i bezpośrednio ustanawia dokładnie tę tezę — bez potrzeby dodatkowych założeń, uogólnień czy własnej wiedzy prawniczej.
+- "partial_support": źródło potwierdza tylko CZĘŚĆ szerszej tezy (np. węższy warunek, inny podmiot, inna instytucja prawna) — reszta tezy pozostaje NIEPOPARTA. Werdykt "partial_support" NIGDY nie może być traktowany jak "direct_support" — jeśli źródło nie ustanawia całości twierdzenia, to NIE jest direct_support.
+- "no_support": źródło nie ustanawia tezy w żadnym istotnym zakresie, dotyczy innej instytucji prawnej, innego stanu faktycznego lub innej dziedziny prawa niż twierdzenie — nawet jeśli używa podobnych słów albo pochodzi z tego samego aktu prawnego.
 
 ZASADY:
-- NIE oceniaj, czy twierdzenie jest ogólnie prawdziwe w polskim prawie. Twierdzenie może być ogólnie prawdziwe w oderwaniu od sprawy, a mimo to NIEPOPARTE dostarczonym źródłem — wtedy supported = false.
-- NIE korzystaj z własnej wiedzy prawniczej, aby "uratować" twierdzenie, którego dostarczone źródło faktycznie nie potwierdza treścią.
-- Źródło regulujące inną instytucję prawną, inny stan faktyczny lub inną dziedzinę prawa niż ta, której dotyczy twierdzenie, NIE stanowi wsparcia — nawet jeśli używa podobnych słów albo pochodzi z tego samego aktu prawnego.
-- supported = true tylko wtedy, gdy treść źródła rzeczywiście i wprost (albo przez jednoznaczną, bezpośrednią interpretację) odnosi się do konkretnej tezy z statement.
-- Jeżeli supported = true, supportingSourceIds MUSI zawierać co najmniej jeden identyfikator spośród dostarczonych dla tego wniosku. Jeżeli supported = false, supportingSourceIds powinno być puste.
+- NIE korzystaj z własnej wiedzy prawniczej, aby "uratować" twierdzenie, którego dostarczone źródło faktycznie nie ustanawia treścią.
+- NIE hedguj/nie podwyższaj częściowego wsparcia do "direct_support" — jeśli masz wątpliwość, czy to pełne czy częściowe wsparcie, wybierz "partial_support" albo "no_support", nigdy nie zaokrąglaj w górę.
+- Jeżeli verdict = "direct_support", musisz podać w polu "evidence" JEDEN LUB WIĘCEJ krótkich DOSŁOWNYCH (verbatim) fragmentów tekstu źródła, które wprost ustanawiają tezę. Fragment musi być dokładnym cytatem z dostarczonego tekstu źródła — NIE WOLNO parafrazować, skracać treściowo ani rekonstruować z pamięci. Każdy fragment evidence musi zawierać poprawny "sourceId" (SOURCE_X) spośród dostarczonych dla tego wniosku.
+- Jeżeli verdict = "partial_support" lub "no_support", pole "evidence" powinno być puste.
 - W polu reason krótko (1-2 zdania) uzasadnij werdykt, odnosząc się do treści źródła, nie do ogólnej wiedzy prawniczej.
 - NIGDY nie wymyślaj nowych identyfikatorów źródeł, numerów artykułów ani przepisów. Cytuj WYŁĄCZNIE identyfikatory SOURCE_X dokładnie tak, jak podano dla danego wniosku.
-- Zwróć dokładnie jeden wynik dla każdego dostarczonego conclusionIndex.
+- Zwróć DOKŁADNIE jeden wynik dla KAŻDEGO dostarczonego wniosku — odpowiedź musi zawierać pole dla każdego z nich, bez pomijania żadnego.
 
-Odpowiedz WYŁĄCZNIE poprawnym obiektem JSON w formacie:
-{"results": [{"conclusionIndex": number, "supported": boolean, "reason": string, "supportingSourceIds": ["SOURCE_X", ...]}]}`;
+Odpowiedz WYŁĄCZNIE poprawnym obiektem JSON, gdzie kluczem dla wniosku o indeksie N jest "result_N" (np. "result_0" dla WNIOSKU #0), w formacie:
+{"result_0": {"verdict": "direct_support"|"partial_support"|"no_support", "reason": string, "evidence": [{"sourceId": "SOURCE_X", "excerpt": string}]}, "result_1": {...}, ...}`;
 
 export interface ConclusionSourceForVerification {
   sourceId: string;
@@ -128,6 +139,65 @@ function conclusionIndexLabel(conclusionIndex: number): string {
   return String(conclusionIndex);
 }
 
+/** Deterministic key for a per-conclusion result field, e.g. `result_0`, `result_12`. */
+function resultKeyFor(conclusionIndex: number): string {
+  return `result_${conclusionIndex}`;
+}
+
+/**
+ * Builds a request-scoped OpenAI strict Structured Outputs JSON Schema.
+ *
+ * Deliberately modeled as an OBJECT with one required `result_<index>` property per supplied
+ * conclusion — NOT an array of `{conclusionIndex, ...}` items. JSON Schema's `array` type only
+ * constrains the shape of each item, never the item COUNT, so an array-shaped schema cannot
+ * stop the model from silently omitting one conclusion's result (the exact live failure this
+ * hardening pass targets: "Missing verification result for conclusionIndex N"). An object
+ * schema's `required` list, combined with `additionalProperties: false`, IS enforced by
+ * OpenAI's constrained decoding — the model is structurally unable to produce valid JSON
+ * without every required key present. `evidence.sourceId` is constrained to the union of
+ * source ids supplied across all conclusions in the batch — a single static schema cannot
+ * express "sourceId must belong to THIS conclusion" when different conclusions have different
+ * allowed sets, so that finer, per-conclusion ownership check remains enforced afterward by
+ * buildRawConclusionVerificationResponseSchema (Zod), unchanged, after this response is
+ * reshaped back into the `{results: [...]}` array the rest of the pipeline expects.
+ */
+function buildStrictVerificationJsonSchema(allowedConclusionIndices: number[], unionSourceIds: string[]) {
+  const resultSchema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      verdict: { type: "string", enum: ["direct_support", "partial_support", "no_support"] },
+      reason: { type: "string" },
+      evidence: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            sourceId: { type: "string", enum: unionSourceIds },
+            excerpt: { type: "string" },
+          },
+          required: ["sourceId", "excerpt"],
+        },
+      },
+    },
+    required: ["verdict", "reason", "evidence"],
+  };
+
+  const keys = allowedConclusionIndices.map(resultKeyFor);
+  const properties: Record<string, typeof resultSchema> = {};
+  for (const key of keys) {
+    properties[key] = resultSchema;
+  }
+
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties,
+    required: keys,
+  };
+}
+
 /**
  * Verifies each generated legal conclusion against ONLY the source text the generator
  * itself claimed as support for it — a valid SOURCE_X citation is necessary but not
@@ -161,6 +231,9 @@ export async function verifyConclusionSupport(
     ]),
   );
   const responseSchema = buildRawConclusionVerificationResponseSchema(allowedSourceIdsByConclusionIndex);
+  const allowedConclusionIndices = input.conclusions.map((conclusion) => conclusion.conclusionIndex);
+  const unionSourceIds = [...new Set(input.conclusions.flatMap((conclusion) => conclusion.sources.map((s) => s.sourceId)))];
+  const jsonSchema = buildStrictVerificationJsonSchema(allowedConclusionIndices, unionSourceIds);
   const userMessage = buildUserMessage(input);
 
   for (let attempt = 0; ; attempt += 1) {
@@ -175,7 +248,10 @@ export async function verifyConclusionSupport(
         body: JSON.stringify({
           model,
           temperature: 0,
-          response_format: { type: "json_object" },
+          response_format: {
+            type: "json_schema",
+            json_schema: { name: "strict_verification", strict: true, schema: jsonSchema },
+          },
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
             { role: "user", content: userMessage },
@@ -223,20 +299,61 @@ export async function verifyConclusionSupport(
       throw new ConclusionVerificationError("OpenAI verification response is not valid JSON", "INVALID_RESPONSE");
     }
 
-    return parseChatCompletionContent(payload, responseSchema);
+    return parseChatCompletionContent(payload, responseSchema, allowedConclusionIndices);
   }
+}
+
+/**
+ * Reshapes the strict Structured Outputs keyed-object payload (`{result_0: {...}, result_3:
+ * {...}}`) back into the `{results: [{conclusionIndex, ...}, ...]}` array shape the existing
+ * Zod validation (buildRawConclusionVerificationResponseSchema) and the rest of the pipeline
+ * expect. A key present in the payload but not among `allowedConclusionIndices` is dropped
+ * silently here — it will never happen under a genuinely strict-schema-conforming response
+ * (additionalProperties: false forbids it), but if it did, downstream Zod validation still
+ * has the final say via its own missing/unknown-index checks on the reshaped array.
+ */
+function reshapeKeyedResultsToArray(parsedContent: unknown, allowedConclusionIndices: number[]): unknown {
+  if (!parsedContent || typeof parsedContent !== "object") {
+    return parsedContent;
+  }
+
+  const source = parsedContent as Record<string, unknown>;
+  const results = allowedConclusionIndices
+    .filter((conclusionIndex) => resultKeyFor(conclusionIndex) in source)
+    .map((conclusionIndex) => {
+      const entry = source[resultKeyFor(conclusionIndex)];
+      return entry && typeof entry === "object" ? { conclusionIndex, ...entry } : entry;
+    });
+
+  return { results };
 }
 
 function parseChatCompletionContent(
   payload: unknown,
   responseSchema: ReturnType<typeof buildRawConclusionVerificationResponseSchema>,
+  allowedConclusionIndices: number[],
 ): RawConclusionVerificationResult[] {
   const envelope = chatCompletionEnvelopeSchema.safeParse(payload);
   if (!envelope.success) {
     throw new ConclusionVerificationError("OpenAI chat completion response has an unexpected shape", "INVALID_RESPONSE");
   }
 
-  const content = envelope.data.choices[0]?.message.content;
+  const choice = envelope.data.choices[0];
+  if (!choice) {
+    throw new ConclusionVerificationError("OpenAI chat completion response has no choices", "INVALID_RESPONSE");
+  }
+
+  if (choice.message.refusal) {
+    throw new ConclusionVerificationError("OpenAI declined to produce a structured verification response", "INVALID_RESPONSE");
+  }
+  if (choice.finish_reason && choice.finish_reason !== "stop") {
+    throw new ConclusionVerificationError(
+      `OpenAI verification response did not complete normally (finish_reason: ${choice.finish_reason})`,
+      "INVALID_RESPONSE",
+    );
+  }
+
+  const content = choice.message.content;
   if (!content) {
     throw new ConclusionVerificationError("OpenAI chat completion response has no content", "INVALID_RESPONSE");
   }
@@ -248,7 +365,8 @@ function parseChatCompletionContent(
     throw new ConclusionVerificationError("Model response was not valid JSON", "INVALID_RESPONSE");
   }
 
-  const result = responseSchema.safeParse(parsedContent);
+  const reshaped = reshapeKeyedResultsToArray(parsedContent, allowedConclusionIndices);
+  const result = responseSchema.safeParse(reshaped);
   if (!result.success) {
     throw new ConclusionVerificationError(
       `Model response did not match the expected verification schema: ${result.error.issues

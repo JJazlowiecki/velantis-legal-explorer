@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { FinalAnswerGenerationError, generateFinalAnswer } from "./generate";
+import { RecoveryGenerationError, generateRecoveryConclusions } from "./recovery";
 import type { PackedSource } from "./packing";
 
 function chatResponse(status: number, body: unknown): Response {
@@ -33,24 +33,24 @@ const source: PackedSource = {
 
 const baseInput = {
   problemDescription: "opis problemu",
-  issues: [{ label: "issue", likelihood: "possible" as const, rationale: "rationale" }],
   sources: [source],
 };
 
 const validPayload = {
-  answer: "Zgodnie z art. 471 dłużnik odpowiada za nienależyte wykonanie.",
   conclusions: [
-    { statement: "Dłużnik może odpowiadać odszkodowawczo.", support: [{ sourceId: "SOURCE_1" }] },
+    {
+      statement: "Dłużnik jest obowiązany do naprawienia szkody.",
+      support: [{ sourceId: "SOURCE_1", excerpt: "Dłużnik obowiązany jest do naprawienia szkody." }],
+    },
   ],
-  alternativePaths: [],
   uncertainties: [],
 };
 
-describe("generateFinalAnswer", () => {
+describe("generateRecoveryConclusions", () => {
   it("throws a CONFIG error and makes no request when there are zero sources", async () => {
     const fetchImpl = vi.fn();
     await expect(
-      generateFinalAnswer({ ...baseInput, sources: [] }, { apiKey: "k", fetchImpl }),
+      generateRecoveryConclusions({ ...baseInput, sources: [] }, { apiKey: "k", fetchImpl }),
     ).rejects.toMatchObject({ code: "CONFIG" });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -58,22 +58,42 @@ describe("generateFinalAnswer", () => {
   it("throws a CONFIG error when no API key is available", async () => {
     const fetchImpl = vi.fn();
     await expect(
-      generateFinalAnswer(baseInput, { apiKey: undefined, fetchImpl }),
+      generateRecoveryConclusions(baseInput, { apiKey: undefined, fetchImpl }),
     ).rejects.toMatchObject({ code: "CONFIG" });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("parses a valid grounded response", async () => {
+  it("parses a valid recovery response with an empty conclusions list (fully acceptable outcome)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(withContent({ conclusions: [], uncertainties: [] }));
+    const result = await generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl });
+    expect(result.conclusions).toEqual([]);
+  });
+
+  it("parses a valid recovery response with a supported conclusion", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
-    const result = await generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl });
+    const result = await generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl });
 
     expect(result.conclusions).toHaveLength(1);
-    expect(result.conclusions[0].support[0].sourceId).toBe("SOURCE_1");
+    expect(result.conclusions[0].support[0]).toEqual({
+      sourceId: "SOURCE_1",
+      excerpt: "Dłużnik obowiązany jest do naprawienia szkody.",
+    });
+  });
+
+  it("never sends the rejected first-pass statements — only source text and the user question", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
+    await generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(String(init.body)).toContain(source.text);
+    expect(String(init.body)).toContain(baseInput.problemDescription);
+    // the prompt only ever says a first draft failed, never repeats its content
+    expect(String(init.body)).not.toContain("TWIERDZENIE_ODRZUCONE");
   });
 
   it("never logs the API key in the request", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
-    await generateFinalAnswer(baseInput, { apiKey: "super-secret-key", fetchImpl });
+    await generateRecoveryConclusions(baseInput, { apiKey: "super-secret-key", fetchImpl });
 
     const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
     const headers = init.headers as Record<string, string>;
@@ -81,22 +101,13 @@ describe("generateFinalAnswer", () => {
     expect(String(init.body)).not.toContain("super-secret-key");
   });
 
-  it("includes only supplied source ids in the prompt payload sent to the model", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
-    await generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl });
-
-    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
-    expect(String(init.body)).toContain("SOURCE_1");
-    expect(String(init.body)).toContain("art. 471");
-  });
-
-  it("A: uses strict json_schema Structured Outputs constraining support.sourceId to exactly the supplied SOURCE_X ids", async () => {
+  it("uses strict json_schema Structured Outputs constraining support.sourceId to exactly the supplied SOURCE_X ids", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
     const twoSources: PackedSource[] = [
       source,
       { ...source, sourceId: "SOURCE_2", legalProvisionId: "p2", citationLabel: "art. 556" },
     ];
-    await generateFinalAnswer({ ...baseInput, sources: twoSources }, { apiKey: "test-key", fetchImpl });
+    await generateRecoveryConclusions({ ...baseInput, sources: twoSources }, { apiKey: "test-key", fetchImpl });
 
     const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(String(init.body));
@@ -107,76 +118,72 @@ describe("generateFinalAnswer", () => {
     const schema = body.response_format.json_schema.schema;
     const sourceEnum = schema.properties.conclusions.items.properties.support.items.properties.sourceId.enum;
     expect(sourceEnum).toEqual(["SOURCE_1", "SOURCE_2"]);
-    expect(sourceEnum).not.toContain("SOURCE_171");
-    expect(sourceEnum).not.toContain("SOURCE_99");
-
-    const altPathSourceEnum =
-      schema.properties.alternativePaths.items.properties.support.items.properties.sourceId.enum;
-    expect(altPathSourceEnum).toEqual(["SOURCE_1", "SOURCE_2"]);
-  });
-
-  it("B: the generated schema marks every property as required and forbids additional properties", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
-    await generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl });
-
-    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
-    const schema = JSON.parse(String(init.body)).response_format.json_schema.schema;
-
     expect(schema.additionalProperties).toBe(false);
-    expect(schema.required).toEqual(["answer", "conclusions", "alternativePaths", "uncertainties", "clarificationQuestion"]);
-    expect(schema.properties.conclusions.items.additionalProperties).toBe(false);
-    expect(schema.properties.conclusions.items.required).toEqual(["statement", "support"]);
-  });
-
-  it("H: fails closed when the model refuses to produce a structured response", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(
-      chatResponse(200, { choices: [{ message: { content: null, refusal: "cannot comply" }, finish_reason: "stop" }] }),
-    );
-
-    await expect(
-      generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
-    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
-  });
-
-  it("H: fails closed when the response is truncated (finish_reason=length) instead of completing normally", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(
-      chatResponse(200, {
-        choices: [{ message: { content: JSON.stringify(validPayload) }, finish_reason: "length" }],
-      }),
-    );
-
-    await expect(
-      generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
-    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    expect(schema.required).toEqual(["conclusions", "uncertainties"]);
   });
 
   it("rejects a response referencing an unknown/fabricated SOURCE_X", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
       withContent({
-        ...validPayload,
-        conclusions: [{ statement: "Twierdzenie.", support: [{ sourceId: "SOURCE_99" }] }],
+        conclusions: [{ statement: "Twierdzenie.", support: [{ sourceId: "SOURCE_99", excerpt: "x" }] }],
+        uncertainties: [],
       }),
     );
 
     await expect(
-      generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+      generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
     ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
-  it("rejects a conclusion with no support", async () => {
+  it("rejects a conclusion with no support entries", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
-      withContent({ ...validPayload, conclusions: [{ statement: "Twierdzenie bez źródła.", support: [] }] }),
+      withContent({ conclusions: [{ statement: "Twierdzenie bez źródła.", support: [] }], uncertainties: [] }),
     );
 
     await expect(
-      generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+      generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
     ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
-  it("tolerates an empty-string clarificationQuestion instead of rejecting an otherwise valid response", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(withContent({ ...validPayload, clarificationQuestion: "" }));
-    const result = await generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl });
-    expect(result.clarificationQuestion).toBeUndefined();
+  it("rejects a support entry missing an excerpt", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      chatResponse(200, {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                conclusions: [{ statement: "Twierdzenie.", support: [{ sourceId: "SOURCE_1" }] }],
+                uncertainties: [],
+              }),
+            },
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("fails closed when the model refuses to produce a structured response", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      chatResponse(200, { choices: [{ message: { content: null, refusal: "cannot comply" }, finish_reason: "stop" }] }),
+    );
+
+    await expect(
+      generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("fails closed when the response is truncated (finish_reason=length)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      chatResponse(200, { choices: [{ message: { content: JSON.stringify(validPayload) }, finish_reason: "length" }] }),
+    );
+
+    await expect(
+      generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("rejects malformed JSON returned by the model", async () => {
@@ -185,14 +192,14 @@ describe("generateFinalAnswer", () => {
       .mockResolvedValue(chatResponse(200, { choices: [{ message: { content: "not valid json at all" } }] }));
 
     await expect(
-      generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+      generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
     ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
   it("fails clearly on authentication errors without retrying", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(chatResponse(401, { error: "invalid api key" }));
 
-    await expect(generateFinalAnswer(baseInput, { apiKey: "bad-key", fetchImpl })).rejects.toMatchObject({
+    await expect(generateRecoveryConclusions(baseInput, { apiKey: "bad-key", fetchImpl })).rejects.toMatchObject({
       code: "HTTP_ERROR",
       status: 401,
     });
@@ -207,7 +214,7 @@ describe("generateFinalAnswer", () => {
         .mockResolvedValueOnce(chatResponse(503, { error: "unavailable" }))
         .mockResolvedValueOnce(withContent(validPayload));
 
-      const resultPromise = generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 2 });
+      const resultPromise = generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 2 });
       await vi.runAllTimersAsync();
       const result = await resultPromise;
 
@@ -222,7 +229,7 @@ describe("generateFinalAnswer", () => {
     vi.useFakeTimers();
     try {
       const fetchImpl = vi.fn().mockResolvedValue(chatResponse(503, { error: "unavailable" }));
-      const resultPromise = generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 1 });
+      const resultPromise = generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl, maxRetries: 1 });
       const assertion = expect(resultPromise).rejects.toMatchObject({ code: "HTTP_ERROR", status: 503 });
 
       await vi.runAllTimersAsync();
@@ -234,11 +241,11 @@ describe("generateFinalAnswer", () => {
   });
 });
 
-describe("FinalAnswerGenerationError", () => {
+describe("RecoveryGenerationError", () => {
   it("carries a code and optional status", () => {
-    const error = new FinalAnswerGenerationError("boom", "HTTP_ERROR", 500);
+    const error = new RecoveryGenerationError("boom", "HTTP_ERROR", 500);
     expect(error.code).toBe("HTTP_ERROR");
     expect(error.status).toBe(500);
-    expect(error.name).toBe("FinalAnswerGenerationError");
+    expect(error.name).toBe("RecoveryGenerationError");
   });
 });

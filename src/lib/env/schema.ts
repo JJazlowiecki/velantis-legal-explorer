@@ -10,6 +10,15 @@ export const serverEnvSchema = z.object({
   OPENAI_ISSUE_DETECTION_MODEL: z.string().min(1).default("gpt-4o-mini"),
   OPENAI_FINAL_ANSWER_MODEL: z.string().min(1).default("gpt-4o-mini"),
   OPENAI_GROUNDING_VERIFICATION_MODEL: z.string().min(1).default("gpt-4o-mini"),
+  // Second, skeptical verification pass (see src/lib/legal/answer/skeptic.ts) — deliberately
+  // a separate setting from OPENAI_GROUNDING_VERIFICATION_MODEL so the two stages can be
+  // tuned independently later, even though they share the same low-cost default today.
+  OPENAI_GROUNDING_SKEPTIC_MODEL: z.string().min(1).default("gpt-4o-mini"),
+  // Bounded, source-first recovery generation pass (see src/lib/legal/answer/recovery.ts) —
+  // runs at most once, only when the normal pipeline produced zero verified conclusions
+  // despite usable retrieval evidence. Deliberately a separate setting so it can be tuned
+  // independently even though it shares the same low-cost default today.
+  OPENAI_GROUNDING_RECOVERY_MODEL: z.string().min(1).default("gpt-4o-mini"),
   // Calibrated against text-embedding-3-small on the DU/1960/168 corpus: unrelated/nonsense
   // Polish queries scored up to ~0.30 cosine similarity (OpenAI embeddings have a non-zero
   // baseline for unrelated short legal text), while genuinely relevant queries scored 0.42+

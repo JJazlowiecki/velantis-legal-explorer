@@ -4,11 +4,26 @@ import * as schema from "../../../db/schema";
 import type { EmbedTextsFn } from "../search/embeddings";
 import { type DetectLegalIssuesFn, type DetectLegalIssuesOptions } from "../issues/detect";
 import { investigateLegalProblem } from "../issues/investigate";
+import { validateEvidenceAgainstSources } from "./evidence";
 import { generateFinalAnswer, type GenerateFinalAnswerFn, type GenerateFinalAnswerOptions } from "./generate";
 import { packSources, type PackedSource } from "./packing";
+import {
+  generateRecoveryConclusions,
+  type GenerateRecoveryConclusionsFn,
+  type GenerateRecoveryConclusionsOptions,
+} from "./recovery";
+import type { RawRecoveryResponse, RecoveryConclusion } from "./recovery-schema";
 import type { FinalAnswerConclusion, FinalAnswerSourceReference } from "./schema";
 import {
+  runSkepticalVerification,
+  type ConclusionForSkepticReview,
+  type RunSkepticalVerificationFn,
+  type RunSkepticalVerificationOptions,
+} from "./skeptic";
+import type { SkepticResult } from "./skeptic-schema";
+import {
   verifyConclusionSupport,
+  type ConclusionSourceForVerification,
   type VerifyConclusionSupportFn,
   type VerifyConclusionSupportOptions,
 } from "./verify";
@@ -35,6 +50,10 @@ export interface AnswerLegalProblemOptions {
   generateFinalAnswerOptions?: GenerateFinalAnswerOptions;
   verifyConclusionSupport?: VerifyConclusionSupportFn;
   verifyConclusionSupportOptions?: VerifyConclusionSupportOptions;
+  runSkepticalVerification?: RunSkepticalVerificationFn;
+  runSkepticalVerificationOptions?: RunSkepticalVerificationOptions;
+  generateRecoveryConclusions?: GenerateRecoveryConclusionsFn;
+  generateRecoveryConclusionsOptions?: GenerateRecoveryConclusionsOptions;
 }
 
 /** Full source metadata resolved back from a SOURCE_X reference — never just a bare id. */
@@ -170,12 +189,33 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
     support: resolveSupport(path.support, packedBySourceId),
   }));
 
-  const { verifiedConclusions, demotedAlternativePaths } = await verifyDraftConclusions(
+  const firstPass = await verifyDraftConclusions(
     investigation.problemDescription,
     raw.conclusions,
     packedBySourceId,
     options,
   );
+
+  let verifiedConclusions = firstPass.verifiedConclusions;
+  let demotedAlternativePaths = firstPass.demotedAlternativePaths;
+
+  // Bounded, single source-first recovery pass: only when usable retrieval evidence exists
+  // (guaranteed at this point — the zero-provisions case already returned above) AND the
+  // normal generate -> verify -> skeptic pipeline produced zero verified conclusions. Never
+  // runs when at least one conclusion already survived, and never loops or retries beyond
+  // this single call. See recovery.ts and runRecoveryPass for why this cannot rescue a
+  // rejected claim — it rebuilds from source text alone and is re-verified through the exact
+  // same gates as the first pass.
+  if (verifiedConclusions.length === 0) {
+    const recoveryPass = await runRecoveryPass(
+      investigation.problemDescription,
+      packedSources,
+      packedBySourceId,
+      options,
+    );
+    verifiedConclusions = recoveryPass.verifiedConclusions;
+    demotedAlternativePaths = [...demotedAlternativePaths, ...recoveryPass.demotedAlternativePaths];
+  }
 
   const alternativePaths = [...draftAlternativePaths, ...demotedAlternativePaths];
 
@@ -264,11 +304,20 @@ function buildDeterministicAnswerText(
  * A valid SOURCE_X citation is necessary but not sufficient: the generator can cite a real,
  * validly-supplied source and still misapply it to a claim its text does not substantively
  * support (observed live: a real KPA procedural provision cited to support an unrelated
- * property-tort conclusion). This stage verifies each draft conclusion against ONLY the
- * source text the generator itself claimed as support — never other retrieved sources as
- * rescuing "alternative evidence" — and fails closed: a conclusion that does not pass
- * verification is never returned as a verified conclusion, only ever as an unsupported
- * alternative path with empty support.
+ * property-tort conclusion). A conclusion survives only after passing ALL of:
+ *
+ *   1. stage 1 (verify.ts): strict tri-state verdict — only "direct_support" continues,
+ *      never "partial_support" (no hedging upward) or "no_support";
+ *   2. code-level validation (evidence.ts): every excerpt the model claims as evidence must
+ *      occur verbatim (whitespace-normalized only, no fuzzy matching) in the exact source
+ *      text the generator itself claimed as support for that conclusion — never other
+ *      retrieved sources as rescuing "alternative evidence";
+ *   3. stage 2 (skeptic.ts): a separate, adversarially-framed pass over only the stage-1
+ *      survivors, which must find no unsupported legal leap (scope expansion, domain
+ *      mismatch, procedural/substantive confusion, etc.).
+ *
+ * Any failure at any stage fails closed: the conclusion is never returned as verified, only
+ * ever as a demoted, unsupported alternative path with empty support.
  */
 async function verifyDraftConclusions(
   problemDescription: string,
@@ -290,24 +339,29 @@ async function verifyDraftConclusions(
   }));
 
   const verify = options.verifyConclusionSupport ?? verifyConclusionSupport;
-  const verificationResults = await verify(
+  const strictResults = await verify(
     { problemDescription, conclusions: conclusionsToVerify },
     options.verifyConclusionSupportOptions,
   );
 
-  const resultByIndex = new Map<number, RawConclusionVerificationResult>();
-  for (const result of verificationResults) {
-    resultByIndex.set(result.conclusionIndex, result);
+  const strictByIndex = new Map<number, RawConclusionVerificationResult>();
+  for (const result of strictResults) {
+    strictByIndex.set(result.conclusionIndex, result);
   }
 
-  const verifiedConclusions: ResolvedConclusion[] = [];
   const demotedAlternativePaths: ResolvedAlternativePath[] = [];
+  const strictPassed: {
+    conclusionIndex: number;
+    conclusion: FinalAnswerConclusion;
+    sources: ConclusionSourceForVerification[];
+    confirmedExcerpts: { sourceId: string; excerpt: string }[];
+  }[] = [];
 
   draftConclusions.forEach((conclusion, conclusionIndex) => {
     const claimedSourceIds = new Set(conclusion.support.map((ref) => ref.sourceId));
-    const verification = resultByIndex.get(conclusionIndex);
+    const strict = strictByIndex.get(conclusionIndex);
 
-    if (!verification) {
+    if (!strict) {
       // Defense in depth against a misbehaving injected verifier: the default
       // implementation's Zod schema already guarantees exactly one result per index.
       throw new LegalAnswerError(
@@ -315,33 +369,179 @@ async function verifyDraftConclusions(
       );
     }
 
-    for (const sourceId of verification.supportingSourceIds) {
-      if (!claimedSourceIds.has(sourceId)) {
+    for (const evidenceItem of strict.evidence) {
+      if (!claimedSourceIds.has(evidenceItem.sourceId)) {
         throw new LegalAnswerError(
-          `Verifier referenced source "${sourceId}" that was not among the sources claimed by conclusion ${conclusionIndex} — refusing to fabricate support`,
+          `Verifier referenced source "${evidenceItem.sourceId}" that was not among the sources claimed by conclusion ${conclusionIndex} — refusing to fabricate support`,
         );
       }
     }
 
-    if (verification.supported && verification.supportingSourceIds.length > 0) {
-      verifiedConclusions.push({
-        statement: conclusion.statement,
-        support: resolveSupport(
-          verification.supportingSourceIds.map((sourceId) => ({ sourceId })),
-          packedBySourceId,
-        ),
+    if (strict.verdict !== "direct_support") {
+      demotedAlternativePaths.push({
+        issueLabel: conclusion.statement,
+        explanation: `Weryfikacja merytoryczna (etap 1) nie potwierdziła tego twierdzenia jako bezpośrednio wspartego dostarczonymi źródłami: ${strict.reason}`,
+        support: [],
       });
       return;
     }
 
-    demotedAlternativePaths.push({
-      issueLabel: conclusion.statement,
-      explanation: `Weryfikacja merytoryczna nie potwierdziła tego twierdzenia dostarczonymi źródłami: ${verification.reason}`,
-      support: [],
+    const sourceTextById = new Map(
+      conclusionsToVerify[conclusionIndex].sources.map((source) => [source.sourceId, source.text]),
+    );
+    const failures = validateEvidenceAgainstSources(strict.evidence, sourceTextById);
+
+    if (failures.length > 0) {
+      demotedAlternativePaths.push({
+        issueLabel: conclusion.statement,
+        explanation:
+          "Zwrócone przez model fragmenty dowodowe nie zostały odnalezione dosłownie w tekście wskazanego źródła — twierdzenie odrzucono zgodnie z zasadą fail-closed, bez dalszej weryfikacji.",
+        support: [],
+      });
+      return;
+    }
+
+    strictPassed.push({
+      conclusionIndex,
+      conclusion,
+      sources: conclusionsToVerify[conclusionIndex].sources,
+      confirmedExcerpts: strict.evidence.map((item) => ({ sourceId: item.sourceId, excerpt: item.excerpt })),
     });
   });
 
+  if (strictPassed.length === 0) {
+    return { verifiedConclusions: [], demotedAlternativePaths };
+  }
+
+  const skepticInput: ConclusionForSkepticReview[] = strictPassed.map((passed) => ({
+    conclusionIndex: passed.conclusionIndex,
+    statement: passed.conclusion.statement,
+    sources: passed.sources,
+    confirmedExcerpts: passed.confirmedExcerpts,
+  }));
+
+  const skeptic = options.runSkepticalVerification ?? runSkepticalVerification;
+  const skepticResults = await skeptic(
+    { problemDescription, conclusions: skepticInput },
+    options.runSkepticalVerificationOptions,
+  );
+
+  const skepticByIndex = new Map<number, SkepticResult>();
+  for (const result of skepticResults) {
+    skepticByIndex.set(result.conclusionIndex, result);
+  }
+
+  const verifiedConclusions: ResolvedConclusion[] = [];
+
+  for (const passed of strictPassed) {
+    const skepticResult = skepticByIndex.get(passed.conclusionIndex);
+
+    if (!skepticResult) {
+      // Defense in depth: buildSkepticResponseSchema already guarantees exactly one
+      // result per requested conclusionIndex against a misbehaving injected fake.
+      throw new LegalAnswerError(
+        `Skeptical verifier returned no result for conclusionIndex ${passed.conclusionIndex} — refusing to treat an unreviewed conclusion as verified`,
+      );
+    }
+
+    if (skepticResult.hasUnsupportedLeap) {
+      demotedAlternativePaths.push({
+        issueLabel: passed.conclusion.statement,
+        explanation: `Weryfikacja krytyczna (etap 2) wykryła nieuprawniony skok logiczny wykraczający poza potwierdzony dowód: ${skepticResult.reason}`,
+        support: [],
+      });
+      continue;
+    }
+
+    const uniqueSourceIds = [...new Set(passed.confirmedExcerpts.map((item) => item.sourceId))];
+    verifiedConclusions.push({
+      statement: passed.conclusion.statement,
+      support: resolveSupport(
+        uniqueSourceIds.map((sourceId) => ({ sourceId })),
+        packedBySourceId,
+      ),
+    });
+  }
+
   return { verifiedConclusions, demotedAlternativePaths };
+}
+
+/**
+ * Deterministically drops any recovery conclusion whose self-claimed excerpt does not occur
+ * verbatim in the source text it claims to come from — BEFORE that conclusion is even allowed
+ * to reach the standard verifier. This is an extra gate specific to recovery, on top of (not
+ * instead of) the identical stage-1/evidence/skeptic gates every conclusion — recovery or not
+ * — must still pass afterward via verifyDraftConclusions. Reuses the exact same evidence.ts
+ * mechanism as the standard pipeline (existing whitespace normalization only, no fuzzy match).
+ */
+function filterRecoveryConclusionsByOwnExcerpt(
+  conclusions: RecoveryConclusion[],
+  packedBySourceId: Map<string, PackedSource>,
+): FinalAnswerConclusion[] {
+  const survivors: FinalAnswerConclusion[] = [];
+
+  for (const conclusion of conclusions) {
+    const sourceTextById = new Map<string, string>();
+    for (const item of conclusion.support) {
+      const source = packedBySourceId.get(item.sourceId);
+      if (source) {
+        sourceTextById.set(item.sourceId, source.text);
+      }
+    }
+
+    const failures = validateEvidenceAgainstSources(
+      conclusion.support.map((item) => ({ sourceId: item.sourceId, excerpt: item.excerpt })),
+      sourceTextById,
+    );
+
+    if (failures.length > 0) {
+      continue;
+    }
+
+    survivors.push({
+      statement: conclusion.statement,
+      support: conclusion.support.map((item) => ({ sourceId: item.sourceId })),
+    });
+  }
+
+  return survivors;
+}
+
+/**
+ * Runs the single, bounded source-first recovery pass (see recovery.ts for the generation
+ * prompt/schema). Recovery conclusions receive NO privileged treatment: after the self-
+ * excerpt gate above, survivors are funneled through the identical verifyDraftConclusions
+ * used for the first pass — same strict verifier, same evidence validation, same skeptic. A
+ * recovery-generation failure (network/timeout/malformed output) is caught and logged here
+ * rather than thrown, so a recovery hiccup can never turn what would otherwise have been a
+ * safe insufficient_evidence result into a hard error — it just means recovery contributes
+ * nothing, and the caller's existing insufficient_evidence fallback still applies.
+ */
+async function runRecoveryPass(
+  problemDescription: string,
+  packedSources: PackedSource[],
+  packedBySourceId: Map<string, PackedSource>,
+  options: AnswerLegalProblemOptions,
+): Promise<{ verifiedConclusions: ResolvedConclusion[]; demotedAlternativePaths: ResolvedAlternativePath[] }> {
+  const generateRecovery = options.generateRecoveryConclusions ?? generateRecoveryConclusions;
+
+  let recoveryRaw: RawRecoveryResponse;
+  try {
+    recoveryRaw = await generateRecovery(
+      { problemDescription, sources: packedSources },
+      options.generateRecoveryConclusionsOptions,
+    );
+  } catch (error) {
+    console.error(
+      "Recovery generation pass failed; falling back to the existing insufficient_evidence result:",
+      error instanceof Error ? error.message : "unknown error",
+    );
+    return { verifiedConclusions: [], demotedAlternativePaths: [] };
+  }
+
+  const survivors = filterRecoveryConclusionsByOwnExcerpt(recoveryRaw.conclusions, packedBySourceId);
+
+  return verifyDraftConclusions(problemDescription, survivors, packedBySourceId, options);
 }
 
 function getPackedSource(sourceId: string, packedBySourceId: Map<string, PackedSource>): PackedSource {
