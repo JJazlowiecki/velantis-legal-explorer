@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import * as schema from "../../../db/schema";
 import { legalActResources, legalActs, legalActVersions } from "../../../db/schema";
-import { buildActApiUrl, fetchEliActMetadata } from "./client";
+import { buildActApiUrl, fetchEliActMetadata, fetchEliActReferences } from "./client";
 import {
   choosePreferredCurrentExpression,
   discoverOfficialExpressions,
@@ -12,6 +12,7 @@ import {
   type DiscoveredOfficialExpression,
   type ExpressionSelectionResult,
 } from "./expressions";
+import { syncLegalActRelations } from "./relations";
 import {
   type EliActMetadata,
   ELI_API_BASE_URL,
@@ -69,11 +70,18 @@ export interface IngestResult {
     authorityReason: string;
     warnings: string[];
   };
+  relations: {
+    inserted: number;
+    updated: number;
+    deactivated: number;
+    resolved: number;
+  };
 }
 
 export interface IngestOptions {
   now?: Date;
   fetchMetadata?: typeof fetchEliActMetadata;
+  fetchReferences?: typeof fetchEliActReferences;
   discoverExpressions?: typeof discoverOfficialExpressions;
   db?: PostgresJsDatabase<typeof schema>;
 }
@@ -165,7 +173,7 @@ export function mapEliMetadataToLegalAct(metadata: EliActMetadata): LegalActInse
     announcementDate: metadata.announcementDate ?? null,
     promulgationDate: metadata.promulgation ?? null,
     entryIntoForceDate: metadata.entryIntoForce ?? metadata.validFrom ?? null,
-    expirationDate: null,
+    expirationDate: metadata.expirationDate ?? null,
     status: metadata.status ?? null,
     inForce:
       typeof metadata.inForce === "string"
@@ -404,6 +412,12 @@ function areResourceFieldsEqual(
 export async function ingestEliActMetadata(args: IngestCliArgs, options: IngestOptions = {}) {
   const now = options.now ?? new Date();
   const fetchMetadata = options.fetchMetadata ?? fetchEliActMetadata;
+  // Deliberately NOT defaulted to the live client (unlike fetchMetadata/discoverExpressions
+  // above): relation sync is new behavior added to this existing function, and callers/tests
+  // that don't know about it yet must keep getting exactly their previous behavior (no
+  // /references network call) rather than silently gaining one. The real CLI (ingest-eli.ts)
+  // opts in explicitly.
+  const fetchReferences = options.fetchReferences;
   const discoverExpressions = options.discoverExpressions ?? discoverOfficialExpressions;
   const db = options.db ?? (await import("../../../db/script-db")).getScriptDb();
 
@@ -416,6 +430,23 @@ export async function ingestEliActMetadata(args: IngestCliArgs, options: IngestO
   const discoveredExpressions = await discoverExpressions(metadata);
   const drafts = buildVersionAndResourceDrafts(metadata, discoveredExpressions);
   const actData = mapEliMetadataToLegalAct(metadata);
+
+  // References are fetched OUTSIDE the transaction (a separate, best-effort network call) so a
+  // transient ELI /references outage can never block the core act/version ingest that this
+  // function already reliably performs — relation sync degrades to "no relation changes this
+  // run" rather than failing the whole ingest.
+  let references: Awaited<ReturnType<typeof fetchEliActReferences>> | null = null;
+  if (fetchReferences) {
+    try {
+      references = await fetchReferences({
+        publisher: args.publisher,
+        year: args.year,
+        position: args.position,
+      });
+    } catch {
+      references = null;
+    }
+  }
 
   return db.transaction(async (tx) => {
     const existingAct = (
@@ -450,12 +481,24 @@ export async function ingestEliActMetadata(args: IngestCliArgs, options: IngestO
       actAction = "unchanged";
     }
 
+    const relationsResult = references
+      ? await syncLegalActRelations({ db: tx, legalActId, references, now })
+      : { inserted: 0, updated: 0, deactivated: 0, resolved: 0 };
+
     const desiredExpressionIds = drafts.versions.map((entry) => entry.version.sourceExpressionId);
 
-    const existingVersions = await tx
+    const allExistingVersions = await tx
       .select()
       .from(legalActVersions)
       .where(eq(legalActVersions.legalActId, legalActId));
+    // Reachability-based discovery (this function) only ever manages the legacy, non-immutable
+    // ogl/tj/uj expression slots. Announcement-backed consolidated (tj) versions — created by
+    // ingestOfficialConsolidatedStructure — are immutable-by-identity and must never be matched,
+    // updated, or deleted by this generic sync, even though they can share `sourceExpressionId`
+    // "tj" with a legacy row (see legal_act_versions_source_expression_uidx, now partial).
+    const existingVersions = allExistingVersions.filter(
+      (version) => version.sourceAnnouncementLegalActId === null,
+    );
 
     const versionCounters = {
       inserted: 0,
@@ -598,6 +641,7 @@ export async function ingestEliActMetadata(args: IngestCliArgs, options: IngestO
         authorityReason: drafts.selection.authorityReason,
         warnings: drafts.selection.warnings,
       },
+      relations: relationsResult,
     } satisfies IngestResult;
   });
 }

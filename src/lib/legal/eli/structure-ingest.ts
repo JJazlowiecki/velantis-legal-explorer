@@ -1,9 +1,9 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 
 import * as schema from "../../../db/schema";
 import { legalActVersions, legalActs, legalProvisions } from "../../../db/schema";
-import { parseActStructureHtml } from "./structure";
+import { type ParsedProvision, parseActStructureHtml } from "./structure";
 
 export class StructureIngestError extends Error {
   constructor(message: string) {
@@ -70,6 +70,89 @@ const INSERT_CHUNK_SIZE = 200;
  */
 export const SHRINK_GUARD_MAX_DROP_RATIO = 0.2;
 
+export interface ReplaceProvisionsForVersionInput {
+  db: Db;
+  legalActVersionId: string;
+  parsed: ParsedProvision[];
+  allowDestructiveShrink?: boolean;
+}
+
+export interface ReplaceProvisionsForVersionResult {
+  deletedCount: number;
+  insertedCount: number;
+}
+
+/**
+ * The shared full-replace-inside-a-transaction core used by both `ingestActStructure` (direct
+ * base-act HTML) and the consolidated-TJ pipeline (announcement annex HTML): delete this ONE
+ * version's existing provisions, then insert the freshly parsed set — guarded by the same
+ * destructive-shrink check either way. Never touches any other version's rows; `legal_search_
+ * documents` for the deleted provisions are cleaned up automatically via ON DELETE CASCADE.
+ */
+export async function replaceProvisionsForVersion(
+  input: ReplaceProvisionsForVersionInput,
+): Promise<ReplaceProvisionsForVersionResult> {
+  if (input.parsed.length === 0) {
+    throw new StructureIngestError(
+      "Parsed zero provisions from the supplied HTML — refusing to wipe existing structure with an empty result",
+    );
+  }
+
+  return input.db.transaction(async (tx) => {
+    const [{ count: existingCount }] = await tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(legalProvisions)
+      .where(eq(legalProvisions.legalActVersionId, input.legalActVersionId));
+
+    if (existingCount > 0 && !input.allowDestructiveShrink) {
+      const minAllowed = Math.ceil(existingCount * (1 - SHRINK_GUARD_MAX_DROP_RATIO));
+      if (input.parsed.length < minAllowed) {
+        // Thrown before any DELETE — Drizzle rolls the transaction back, so this is a pure
+        // no-op against the database (no DELETE, no partial mutation).
+        throw new DestructiveShrinkError(
+          `Refusing destructive shrink for legalActVersionId=${input.legalActVersionId}: existing=${existingCount} provisions, new parse=${input.parsed.length} ` +
+            `(more than ${Math.round(SHRINK_GUARD_MAX_DROP_RATIO * 100)}% smaller, minimum allowed=${minAllowed}). ` +
+            "Pass allowDestructiveShrink if this shrink is genuinely expected.",
+          existingCount,
+          input.parsed.length,
+          SHRINK_GUARD_MAX_DROP_RATIO,
+        );
+      }
+    }
+
+    const deleted = await tx
+      .delete(legalProvisions)
+      .where(eq(legalProvisions.legalActVersionId, input.legalActVersionId))
+      .returning({ id: legalProvisions.id });
+
+    for (let i = 0; i < input.parsed.length; i += INSERT_CHUNK_SIZE) {
+      const chunk = input.parsed.slice(i, i + INSERT_CHUNK_SIZE);
+      await tx.insert(legalProvisions).values(
+        chunk.map((node) => ({
+          id: node.id,
+          legalActVersionId: input.legalActVersionId,
+          parentProvisionId: node.parentId,
+          provisionType: node.provisionType,
+          article: node.article,
+          paragraph: node.paragraph,
+          point: node.point,
+          letter: node.letter,
+          citationLabel: node.citationLabel,
+          heading: node.heading,
+          text: node.text,
+          structuralPath: node.structuralPath,
+          ordinal: node.ordinal,
+        })),
+      );
+    }
+
+    return {
+      deletedCount: deleted.length,
+      insertedCount: input.parsed.length,
+    };
+  });
+}
+
 /**
  * Re-ingests structured provisions for ONE EXISTING legal_act_versions row (looked up by
  * source expression id — never created, never a duplicate). Full-replace semantics inside a
@@ -88,77 +171,44 @@ export async function ingestActStructure(input: IngestActStructureInput): Promis
     throw new StructureIngestError(`No legal_acts row found for source=${input.source} sourceId=${input.sourceId}`);
   }
 
+  // Scoped to the LEGACY (non-announcement-backed) alias only — this function is the direct
+  // base-act-HTML pathway (e.g. ogl, or a pre-announcement-model bare tj/uj reachability row).
+  // Multiple immutable, announcement-backed "tj" versions may now coexist for one act (see
+  // ingestOfficialConsolidatedStructure / consolidated-ingest.ts); without this filter, a lookup
+  // by (legalActId, sourceExpressionId) alone would be ambiguous and could silently match/
+  // mutate the wrong, immutable version.
   const [version] = await input.db
     .select({ id: legalActVersions.id })
     .from(legalActVersions)
-    .where(and(eq(legalActVersions.legalActId, act.id), eq(legalActVersions.sourceExpressionId, input.sourceExpressionId)))
+    .where(
+      and(
+        eq(legalActVersions.legalActId, act.id),
+        eq(legalActVersions.sourceExpressionId, input.sourceExpressionId),
+        isNull(legalActVersions.sourceAnnouncementLegalActId),
+      ),
+    )
     .limit(1);
   if (!version) {
     throw new StructureIngestError(
-      `No legal_act_versions row found for act ${input.sourceId} with sourceExpressionId=${input.sourceExpressionId} — refusing to create a new version`,
+      `No legacy (non-announcement-backed) legal_act_versions row found for act ${input.sourceId} with sourceExpressionId=${input.sourceExpressionId} — refusing to create a new version`,
     );
   }
 
-  // Parse BEFORE any DB mutation — the shrink guard below needs the full parsed count to
-  // compare against, and nothing must be deleted if we're about to refuse the replacement.
+  // Parse BEFORE any DB mutation — the shrink guard needs the full parsed count to compare
+  // against, and nothing must be deleted if the replacement is about to be refused.
   const parsed = parseActStructureHtml(input.html);
-  if (parsed.length === 0) {
-    throw new StructureIngestError("Parsed zero provisions from the supplied HTML — refusing to wipe existing structure with an empty result");
-  }
 
-  return input.db.transaction(async (tx) => {
-    const [{ count: existingCount }] = await tx
-      .select({ count: sql<number>`count(*)::int` })
-      .from(legalProvisions)
-      .where(eq(legalProvisions.legalActVersionId, version.id));
-
-    if (existingCount > 0 && !input.allowDestructiveShrink) {
-      const minAllowed = Math.ceil(existingCount * (1 - SHRINK_GUARD_MAX_DROP_RATIO));
-      if (parsed.length < minAllowed) {
-        // Thrown before any DELETE — Drizzle rolls the transaction back, so this is a pure
-        // no-op against the database (no DELETE, no partial mutation).
-        throw new DestructiveShrinkError(
-          `Refusing destructive shrink for legalActVersionId=${version.id}: existing=${existingCount} provisions, new parse=${parsed.length} ` +
-            `(more than ${Math.round(SHRINK_GUARD_MAX_DROP_RATIO * 100)}% smaller, minimum allowed=${minAllowed}). ` +
-            "Pass allowDestructiveShrink if this shrink is genuinely expected.",
-          existingCount,
-          parsed.length,
-          SHRINK_GUARD_MAX_DROP_RATIO,
-        );
-      }
-    }
-
-    const deleted = await tx
-      .delete(legalProvisions)
-      .where(eq(legalProvisions.legalActVersionId, version.id))
-      .returning({ id: legalProvisions.id });
-
-    for (let i = 0; i < parsed.length; i += INSERT_CHUNK_SIZE) {
-      const chunk = parsed.slice(i, i + INSERT_CHUNK_SIZE);
-      await tx.insert(legalProvisions).values(
-        chunk.map((node) => ({
-          id: node.id,
-          legalActVersionId: version.id,
-          parentProvisionId: node.parentId,
-          provisionType: node.provisionType,
-          article: node.article,
-          paragraph: node.paragraph,
-          point: node.point,
-          letter: node.letter,
-          citationLabel: node.citationLabel,
-          heading: node.heading,
-          text: node.text,
-          structuralPath: node.structuralPath,
-          ordinal: node.ordinal,
-        })),
-      );
-    }
-
-    return {
-      legalActId: act.id,
-      legalActVersionId: version.id,
-      deletedCount: deleted.length,
-      insertedCount: parsed.length,
-    };
+  const { deletedCount, insertedCount } = await replaceProvisionsForVersion({
+    db: input.db,
+    legalActVersionId: version.id,
+    parsed,
+    allowDestructiveShrink: input.allowDestructiveShrink,
   });
+
+  return {
+    legalActId: act.id,
+    legalActVersionId: version.id,
+    deletedCount,
+    insertedCount,
+  };
 }

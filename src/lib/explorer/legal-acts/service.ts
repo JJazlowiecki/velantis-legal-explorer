@@ -21,6 +21,16 @@ export interface LegalActVersionSummary {
   effectiveTo: string | null;
   hasStructure: boolean;
   resources: LegalActResourceSummary[];
+  /**
+   * Set ONLY for a real, immutable, announcement-backed consolidated (tj) version — the exact
+   * official "Obwieszczenie ... jednolitego tekstu ustawy" this version's provisions came from.
+   * Null for ogl/uj, and null for the legacy pre-announcement-model bare "tj" reachability alias
+   * (which carries no real consolidated content) — the UI must use this field, not `hasStructure`
+   * or any other proxy, to tell a real snapshot apart from that alias, since a real
+   * announcement-backed version can itself legitimately have zero provisions (e.g. its HTML
+   * wasn't machine-fetchable yet — see current-law-corpus spikes).
+   */
+  announcement: { legalActId: string; sourceId: string; title: string } | null;
 }
 
 export interface LegalActResourceSummary {
@@ -138,6 +148,8 @@ function toVersionSelectionInput(
     currentnessStatus: row.currentnessStatus as CurrentnessStatus,
     fetchedAt: row.fetchedAt,
     hasStructure,
+    sourceAnnouncementLegalActId: row.sourceAnnouncementLegalActId,
+    legalStateDate: row.legalStateDate,
   };
 }
 
@@ -145,6 +157,7 @@ function toVersionSummary(
   row: typeof legalActVersions.$inferSelect,
   hasStructure: boolean,
   resources: LegalActResourceSummary[],
+  announcement: { legalActId: string; sourceId: string; title: string } | null,
 ): LegalActVersionSummary {
   return {
     id: row.id,
@@ -159,6 +172,7 @@ function toVersionSummary(
     effectiveTo: row.effectiveTo,
     hasStructure,
     resources,
+    announcement,
   };
 }
 
@@ -325,6 +339,18 @@ export async function getLegalAct(input: GetLegalActInput): Promise<LegalActDeta
     resourcesByVersion.set(resource.legalActVersionId, list);
   }
 
+  const announcementIds = [
+    ...new Set(versions.map((v) => v.sourceAnnouncementLegalActId).filter((id): id is string => id !== null)),
+  ];
+  const announcementActs =
+    announcementIds.length > 0
+      ? await input.db
+          .select({ id: legalActs.id, sourceId: legalActs.sourceId, title: legalActs.title })
+          .from(legalActs)
+          .where(inArray(legalActs.id, announcementIds))
+      : [];
+  const announcementById = new Map(announcementActs.map((a) => [a.id, a]));
+
   const selectionInputs = versions.map((v) => toVersionSelectionInput(v, (structureCounts.get(v.id) ?? 0) > 0));
   const selection = chooseDisplayVersion(selectionInputs);
 
@@ -340,9 +366,17 @@ export async function getLegalAct(input: GetLegalActInput): Promise<LegalActDeta
     entryIntoForceDate: act.entryIntoForceDate,
     eliUri: act.eliUri,
     officialPageUrl: act.officialPageUrl,
-    versions: versions.map((v) =>
-      toVersionSummary(v, (structureCounts.get(v.id) ?? 0) > 0, resourcesByVersion.get(v.id) ?? []),
-    ),
+    versions: versions.map((v) => {
+      const announcement = v.sourceAnnouncementLegalActId
+        ? (announcementById.get(v.sourceAnnouncementLegalActId) ?? null)
+        : null;
+      return toVersionSummary(
+        v,
+        (structureCounts.get(v.id) ?? 0) > 0,
+        resourcesByVersion.get(v.id) ?? [],
+        announcement ? { legalActId: announcement.id, sourceId: announcement.sourceId, title: announcement.title } : null,
+      );
+    }),
     defaultVersionId: selection.defaultVersionId,
     authoritativeVersionId: selection.authoritativeVersionId,
     retrievalVersionId: selection.retrievalVersionId,

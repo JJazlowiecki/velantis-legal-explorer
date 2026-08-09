@@ -1,0 +1,2 @@
+ALTER TABLE "legal_act_relations" ADD COLUMN "is_active" boolean DEFAULT true NOT NULL;--> statement-breakpoint
+CREATE INDEX "legal_act_relations_is_active_idx" ON "legal_act_relations" USING btree ("is_active");

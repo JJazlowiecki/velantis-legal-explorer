@@ -164,6 +164,64 @@ describeDatabase("ingestActStructure", () => {
       ingestActStructure({ db, source: TEST_SOURCE, sourceId: "TEST/does-not-exist", sourceExpressionId: "ogl", html: SIMPLE_DOCUMENT }),
     ).rejects.toThrow(StructureIngestError);
   });
+
+  it("only ever matches the LEGACY (non-announcement-backed) 'tj' alias, never an immutable announcement-backed 'tj' version, even though both share sourceExpressionId", async () => {
+    if (!db) throw new Error("unreachable");
+    const act = await insertAct("TEST/multi-tj");
+    const legacyTj = await insertVersion(act.id, "tj");
+
+    const [announcement] = await db
+      .insert(legalActs)
+      .values({ jurisdiction: "PL", source: TEST_SOURCE, sourceId: "TEST/announcement-1", title: "Announcement", actType: "Obwieszczenie" })
+      .returning();
+    const [announcementBackedTj] = await db
+      .insert(legalActVersions)
+      .values({
+        legalActId: act.id,
+        versionKind: "consolidated",
+        sourceExpressionId: "tj",
+        sourceAnnouncementLegalActId: announcement.id,
+        sourceDocumentKey: "announcement:TEST/announcement-1",
+      })
+      .returning();
+    await db.insert(legalProvisions).values({
+      legalActVersionId: announcementBackedTj.id,
+      provisionType: "article",
+      citationLabel: "art. 1",
+      text: "Immutable announcement-backed text — must survive.",
+      structuralPath: "arti_1",
+      ordinal: 1,
+    });
+
+    const result = await ingestActStructure({ db, source: TEST_SOURCE, sourceId: "TEST/multi-tj", sourceExpressionId: "tj", html: SIMPLE_DOCUMENT });
+
+    expect(result.legalActVersionId).toBe(legacyTj.id);
+    expect(result.legalActVersionId).not.toBe(announcementBackedTj.id);
+
+    const announcementRows = await db.select().from(legalProvisions).where(eq(legalProvisions.legalActVersionId, announcementBackedTj.id));
+    expect(announcementRows).toHaveLength(1);
+    expect(announcementRows[0].text).toBe("Immutable announcement-backed text — must survive.");
+  });
+
+  it("throws (rather than picking an announcement-backed version) when only announcement-backed 'tj' rows exist and no legacy alias does", async () => {
+    if (!db) throw new Error("unreachable");
+    const act = await insertAct("TEST/only-announcement-tj");
+    const [announcement] = await db
+      .insert(legalActs)
+      .values({ jurisdiction: "PL", source: TEST_SOURCE, sourceId: "TEST/announcement-2", title: "Announcement", actType: "Obwieszczenie" })
+      .returning();
+    await db.insert(legalActVersions).values({
+      legalActId: act.id,
+      versionKind: "consolidated",
+      sourceExpressionId: "tj",
+      sourceAnnouncementLegalActId: announcement.id,
+      sourceDocumentKey: "announcement:TEST/announcement-2",
+    });
+
+    await expect(
+      ingestActStructure({ db, source: TEST_SOURCE, sourceId: "TEST/only-announcement-tj", sourceExpressionId: "tj", html: SIMPLE_DOCUMENT }),
+    ).rejects.toThrow(StructureIngestError);
+  });
 });
 
 describeDatabase("ingestActStructure — destructive-shrink guard", () => {

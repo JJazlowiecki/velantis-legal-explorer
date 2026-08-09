@@ -114,6 +114,60 @@ describeDatabase("legal-acts service", () => {
     expect(items.some((item) => item.id === act.id && item.title === "Kodeks testowy")).toBe(true);
   });
 
+  it("MULTI-TJ: getLegalAct exposes multiple immutable announcement-backed consolidated versions distinctly, with real provenance, and never confuses them with the legacy alias", async () => {
+    if (!db) throw new Error("unreachable");
+    const act = await insertAct({ sourceId: "TEST/multi-tj-kc" });
+
+    const ogl = await insertVersion(act.id, { versionKind: "promulgated", sourceExpressionId: "ogl" });
+    await insertProvision(ogl.id);
+
+    // Legacy, non-announcement-backed "tj" reachability alias — no real content.
+    await insertVersion(act.id, { versionKind: "consolidated", sourceExpressionId: "tj" });
+
+    const announcementOld = await insertAct({ sourceId: "TEST/announcement-old", title: "Obwieszczenie (stary)", actType: "Obwieszczenie" });
+    const announcementNew = await insertAct({ sourceId: "TEST/announcement-new", title: "Obwieszczenie (nowy)", actType: "Obwieszczenie" });
+
+    const tjOld = await insertVersion(act.id, {
+      versionKind: "consolidated",
+      sourceExpressionId: "tj",
+      sourceAnnouncementLegalActId: announcementOld.id,
+      legalStateDate: "2023-07-28",
+    });
+    await insertProvision(tjOld.id, { citationLabel: "art. 1", text: "Treść wg obwieszczenia starego." });
+
+    const tjNew = await insertVersion(act.id, {
+      versionKind: "consolidated",
+      sourceExpressionId: "tj",
+      sourceAnnouncementLegalActId: announcementNew.id,
+      legalStateDate: "2024-06-19",
+    });
+    await insertProvision(tjNew.id, { citationLabel: "art. 1", text: "Treść wg obwieszczenia nowego." });
+
+    const detail = await getLegalAct({ db, id: act.id });
+
+    expect(detail).not.toBeNull();
+    expect(detail!.versions).toHaveLength(4);
+
+    const tjOldSummary = detail!.versions.find((v) => v.id === tjOld.id)!;
+    const tjNewSummary = detail!.versions.find((v) => v.id === tjNew.id)!;
+    const legacyAliasSummary = detail!.versions.find((v) => v.sourceExpressionId === "tj" && v.announcement === null)!;
+
+    expect(tjOldSummary.announcement).toEqual({ legalActId: announcementOld.id, sourceId: "TEST/announcement-old", title: "Obwieszczenie (stary)" });
+    expect(tjNewSummary.announcement).toEqual({ legalActId: announcementNew.id, sourceId: "TEST/announcement-new", title: "Obwieszczenie (nowy)" });
+    expect(legacyAliasSummary).toBeDefined();
+    expect(legacyAliasSummary.hasStructure).toBe(false);
+
+    // Default/authoritative selection must land on a REAL version (never the legacy alias),
+    // deterministically the most recent one by official legalStateDate.
+    expect(detail!.defaultVersionId).toBe(tjNew.id);
+    expect(detail!.authoritativeVersionId).toBe(tjNew.id);
+    expect(detail!.warnings.some((w) => w.includes("niezależne"))).toBe(true);
+
+    // currentnessStatus stays exactly what was stored — never silently promoted.
+    expect(tjOldSummary.currentnessStatus).toBe("unproven");
+    expect(tjNewSummary.currentnessStatus).toBe("unproven");
+  });
+
   it("browsing does not require any visitor identity — listLegalActs takes no visitor parameter", async () => {
     if (!db) throw new Error("unreachable");
     await insertAct({ sourceId: "TEST/no-visitor" });

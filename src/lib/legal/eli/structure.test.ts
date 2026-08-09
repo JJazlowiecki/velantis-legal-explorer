@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseActStructureHtml } from "./structure";
+import { AnnexSelectionError, parseActStructureHtml } from "./structure";
 
 /** Minimal fixture matching the real Sejm/ISAP "text.html" markup convention (verified against the real DU/1964/93 document). */
 function wrapDocument(bodyUnits: string): string {
@@ -194,5 +194,111 @@ describe("parseActStructureHtml", () => {
 
   it("returns [] for HTML that has no recognizable act structure at all", () => {
     expect(parseActStructureHtml("<html><body>not an ELI act document</body></html>")).toEqual([]);
+  });
+});
+
+/** Minimal fixture matching the real Sejm/ISAP announcement "text.html" convention: a
+ * `part_1` administrative preamble followed by a `part_2` "Załącznik - Tekst jednolity ..."
+ * annex containing the actual consolidated-statute body (verified against real DU/2024/1061 and
+ * DU/2024/17 documents). */
+function wrapAnnouncementDocument(options: {
+  preambleArticleId?: string;
+  annexHeading?: string;
+  annexArticleId?: string;
+  extraAnnexSectionId?: string;
+}): string {
+  const preambleArticleId = options.preambleArticleId ?? "pass_1";
+  const annexHeading = options.annexHeading ?? "Załącznik&nbsp;&nbsp;-&nbsp;&nbsp;Tekst jednolity ustawy z dnia 1 stycznia 2000&nbsp;r. Ustawa testowa";
+  const annexArticleId = options.annexArticleId ?? "arti_1";
+
+  const extraSection = options.extraAnnexSectionId
+    ? `
+      <section id="${options.extraAnnexSectionId}">
+        <div class="part" id="_003">
+          <h2 class="part"><span class=" ">${annexHeading}</span></h2>
+          <div class="block">
+            <div class="unit unit_arti pro-text false" id="${annexArticleId}_dup" data-id="${annexArticleId}">
+              <h3 CLASS="pro-none"><B CLASS="b">Art.&nbsp;1.</B></h3>
+              <div class="unit-inner"><div data-template="xText" CLASS="pro-text">Duplicate annex text.</div></div>
+            </div>
+          </div>
+        </div>
+      </section>`
+    : "";
+
+  return `<!DOCTYPE HTML><html><body>
+    <div class="parts">
+      <section id="part_1">
+        <div class="part" id="_001">
+          <h2 class="part"><span class=" ">Treść obwieszczenia</span></h2>
+          <div class="block">
+            <div class="unit unit_arti pro-text false" id="${preambleArticleId}" data-id="${preambleArticleId}">
+              <h3 CLASS="pro-none"><B CLASS="b">1.</B></h3>
+              <div class="unit-inner"><div data-template="xText" CLASS="pro-text">Preamble text — must never be ingested as a base-statute provision.</div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section id="part_2">
+        <div class="part" id="_002">
+          <h2 class="part"><span class=" ">${annexHeading}</span></h2>
+          <div class="block">
+            <div class="unit unit_arti pro-text false" id="${annexArticleId}" data-id="${annexArticleId}">
+              <h3 CLASS="pro-none"><B CLASS="b">Art.&nbsp;1.</B></h3>
+              <div class="unit-inner"><div data-template="xText" CLASS="pro-text">Consolidated statute text.</div></div>
+            </div>
+          </div>
+        </div>
+      </section>${extraSection}
+    </div>
+  </body></html>`;
+}
+
+describe("parseActStructureHtml — mode: consolidated_annex", () => {
+  it("selects only the annex section, excluding the announcement's own preamble", () => {
+    const result = parseActStructureHtml(wrapAnnouncementDocument({}), "consolidated_annex");
+
+    const texts = result.map((node) => node.text);
+    expect(texts.some((text) => text.includes("Preamble text"))).toBe(false);
+    expect(texts.some((text) => text.includes("Consolidated statute text"))).toBe(true);
+  });
+
+  it("preserves the normal citation-hierarchy behavior within the selected annex", () => {
+    const result = parseActStructureHtml(wrapAnnouncementDocument({}), "consolidated_annex");
+    const article = result.find((node) => node.provisionType === "article");
+
+    expect(article).toMatchObject({ citationLabel: "art. 1", article: "1" });
+  });
+
+  it("throws AnnexSelectionError when zero sections have a matching heading", () => {
+    const html = wrapAnnouncementDocument({ annexHeading: "Nie jest to załącznik" });
+
+    expect(() => parseActStructureHtml(html, "consolidated_annex")).toThrow(AnnexSelectionError);
+    try {
+      parseActStructureHtml(html, "consolidated_annex");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AnnexSelectionError);
+      expect((error as InstanceType<typeof AnnexSelectionError>).matchCount).toBe(0);
+    }
+  });
+
+  it("throws AnnexSelectionError when multiple sections have a matching heading, without guessing", () => {
+    const html = wrapAnnouncementDocument({ extraAnnexSectionId: "part_3" });
+
+    expect(() => parseActStructureHtml(html, "consolidated_annex")).toThrow(AnnexSelectionError);
+    try {
+      parseActStructureHtml(html, "consolidated_annex");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AnnexSelectionError);
+      expect((error as InstanceType<typeof AnnexSelectionError>).matchCount).toBe(2);
+    }
+  });
+
+  it("direct (default) mode is unchanged: it still selects part_1, never the annex", () => {
+    const result = parseActStructureHtml(wrapAnnouncementDocument({}));
+    const texts = result.map((node) => node.text);
+
+    expect(texts.some((text) => text.includes("Preamble text"))).toBe(true);
+    expect(texts.some((text) => text.includes("Consolidated statute text"))).toBe(false);
   });
 });

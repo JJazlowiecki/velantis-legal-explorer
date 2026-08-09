@@ -64,6 +64,20 @@
       "when": 1786283418336,
       "tag": "0008_bizarre_stephen_strange",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1786295753918,
+      "tag": "0009_glossy_fixer",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786300098660,
+      "tag": "0010_dark_celestials",
+      "breakpoints": true
     }
   ]
 }
