@@ -2,25 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  Bookmark,
-  ChevronLeft,
-  ChevronRight,
-  CreditCard,
-  FileSearch,
-  History,
-  Plus,
-  Settings,
-  UserCircle2,
-} from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-
-interface SidebarItem {
-  label: string;
-  href: string;
-  icon: React.ComponentType<{ className?: string }>;
-}
+import { isSidebarItemActive, sidebarBottomItems, sidebarTopItems, type SidebarItem } from "./sidebar-nav";
 
 interface AppSidebarProps {
   collapsed: boolean;
@@ -28,19 +13,6 @@ interface AppSidebarProps {
   onNavigate?: () => void;
   className?: string;
 }
-
-const topItems: SidebarItem[] = [
-  { label: "Nowe wyszukiwanie", href: "/explorer", icon: Plus },
-  { label: "Historia", href: "#", icon: History },
-  { label: "Zapisane", href: "#", icon: Bookmark },
-  { label: "Akty prawne", href: "#", icon: FileSearch },
-];
-
-const bottomItems: SidebarItem[] = [
-  { label: "Konto", href: "/login", icon: UserCircle2 },
-  { label: "Plan", href: "#pricing", icon: CreditCard },
-  { label: "Ustawienia", href: "#", icon: Settings },
-];
 
 function SidebarNavItem({
   item,
@@ -127,12 +99,12 @@ export function AppSidebar({ collapsed, onToggleCollapsed, onNavigate, className
 
       <nav aria-label="Primary" className="flex-1 px-3 py-4">
         <div className="space-y-1">
-          {topItems.map((item) => (
+          {sidebarTopItems.map((item) => (
             <SidebarNavItem
               key={item.label}
               item={item}
               collapsed={collapsed}
-              selected={item.href === "/explorer" && pathname === "/explorer"}
+              selected={isSidebarItemActive(pathname, item.href)}
               onNavigate={onNavigate}
             />
           ))}
@@ -141,12 +113,12 @@ export function AppSidebar({ collapsed, onToggleCollapsed, onNavigate, className
         <hr className="my-5 border-border" />
 
         <div className="space-y-1">
-          {bottomItems.map((item) => (
+          {sidebarBottomItems.map((item) => (
             <SidebarNavItem
               key={item.label}
               item={item}
               collapsed={collapsed}
-              selected={item.href === pathname}
+              selected={isSidebarItemActive(pathname, item.href)}
               onNavigate={onNavigate}
             />
           ))}
