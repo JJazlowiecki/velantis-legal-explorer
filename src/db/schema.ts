@@ -4,6 +4,7 @@ import {
 	date,
 	index,
 	integer,
+	jsonb,
 	pgTable,
 	text,
 	timestamp,
@@ -170,5 +171,31 @@ export const legalSearchDocuments = pgTable(
 	(table) => [
 		uniqueIndex("legal_search_documents_legal_provision_id_uidx").on(table.legalProvisionId),
 		index("legal_search_documents_legal_act_version_id_idx").on(table.legalActVersionId),
+	],
+);
+
+/**
+ * Real persisted /explorer search history, scoped by an anonymous `visitor_id` (an
+ * HttpOnly-cookie-backed UUID — see src/lib/explorer/history/visitor.ts). No `user_id`/auth
+ * exists yet; `visitor_id` is deliberately a plain UUID column (not a foreign key) so a future
+ * authenticated `user_id` can be introduced or absorb anonymous ownership without reshaping
+ * this table. `resultSnapshot` is a Zod-validated sanitized view model (see
+ * src/lib/explorer/history/snapshot.ts) — never raw OpenAI responses, embeddings, prompts, or
+ * SOURCE_X placeholders.
+ */
+export const explorerHistoryEntries = pgTable(
+	"explorer_history_entries",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		visitorId: uuid("visitor_id").notNull(),
+		query: text("query").notNull(),
+		status: text("status").notNull(),
+		resultSnapshot: jsonb("result_snapshot").notNull(),
+		corpusVersionIds: jsonb("corpus_version_ids").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => [
+		index("explorer_history_entries_visitor_id_created_at_idx").on(table.visitorId, table.createdAt),
 	],
 );

@@ -24,6 +24,17 @@ export const serverEnvSchema = z.object({
   // test corpus (see src/lib/explorer/corpus-config.ts). Never a global/default corpus —
   // missing or empty configuration is a hard error at the point of use, not silently ignored.
   EXPLORER_TEST_LEGAL_ACT_VERSION_IDS: z.string().optional(),
+  // Explicit, validated on/off switch for persisting /explorer search history (see
+  // src/lib/explorer/history/). Search queries can contain sensitive legal/personal
+  // information, so this is opt-in via config rather than silently always-on — but defaults
+  // to enabled since this whole app is local-only right now and the milestone's manual test
+  // depends on it working out of the box. Revisit this default before any real deployment.
+  // Only the literal strings "true"/"false" are accepted (unlike z.coerce.boolean(), which
+  // would treat the string "false" as truthy).
+  EXPLORER_HISTORY_ENABLED: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((value) => value !== "false"),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
