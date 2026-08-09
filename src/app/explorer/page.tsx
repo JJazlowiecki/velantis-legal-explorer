@@ -2,6 +2,7 @@ import { AppShell } from "@/components/layout/app-shell";
 import { ExampleQuery } from "@/components/example-query";
 import { ExplorerSearchPanel } from "@/components/explorer/explorer-search-panel";
 import { TestCorpusNotice } from "@/components/explorer/test-corpus-notice";
+import { resolveInitialQuery } from "@/lib/explorer/continue-search";
 
 const exampleQuestions = [
   "Kiedy przedawnia się roszczenie?",
@@ -18,7 +19,14 @@ const legalAreas = [
   "Prawo UE",
 ];
 
-export default function ExplorerPage() {
+interface ExplorerPageProps {
+  searchParams: Promise<{ q?: string | string[] }>;
+}
+
+export default async function ExplorerPage({ searchParams }: ExplorerPageProps) {
+  const params = await searchParams;
+  const initialQuery = resolveInitialQuery(params);
+
   return (
     <AppShell>
       <div className="mx-auto flex w-full max-w-[900px] flex-col items-center pt-8 md:pt-16">
@@ -32,7 +40,7 @@ export default function ExplorerPage() {
         </div>
 
         <div className="mt-6 w-full max-w-3xl">
-          <ExplorerSearchPanel />
+          <ExplorerSearchPanel initialQuery={initialQuery} />
         </div>
 
         <div className="mt-8 grid w-full max-w-3xl gap-3 md:grid-cols-2">

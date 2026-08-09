@@ -9,8 +9,13 @@ import type { ExplorerSearchResult } from "@/lib/explorer/view-model";
 
 type ExplorerUiState = { kind: "idle" } | { kind: "result"; result: ExplorerSearchResult };
 
-export function ExplorerSearchPanel() {
-  const [query, setQuery] = useState("");
+interface ExplorerSearchPanelProps {
+  /** Prefilled from ?q= when arriving via "Kontynuuj wyszukiwanie" on /explorer/history — otherwise empty, and /explorer works exactly as before. */
+  initialQuery?: string;
+}
+
+export function ExplorerSearchPanel({ initialQuery = "" }: ExplorerSearchPanelProps) {
+  const [query, setQuery] = useState(initialQuery);
   const [state, setState] = useState<ExplorerUiState>({ kind: "idle" });
   const [isPending, startTransition] = useTransition();
 

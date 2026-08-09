@@ -4,14 +4,22 @@ import { getDb } from "@/db";
 import { getServerEnv } from "@/lib/env/server";
 import { answerLegalProblem } from "@/lib/legal/answer/answer";
 import { parseExplorerTestCorpusVersionIds } from "@/lib/explorer/corpus-config";
-import { runExplorerQuery, type RunExplorerQueryDeps } from "@/lib/explorer/run-query";
+import { createHistoryEntry } from "@/lib/explorer/history/service";
+import { getOrCreateVisitorId } from "@/lib/explorer/history/visitor";
+import { runExplorerQuery, type RecordHistoryEntryInput, type RunExplorerQueryDeps } from "@/lib/explorer/run-query";
 import type { ExplorerSearchResult } from "@/lib/explorer/view-model";
 
-const deps: RunExplorerQueryDeps = {
-  getLegalActVersionIds: () => parseExplorerTestCorpusVersionIds(getServerEnv().EXPLORER_TEST_LEGAL_ACT_VERSION_IDS),
-  answerLegalProblem,
-  getDb,
-};
+async function recordHistoryEntry({ query, result, view }: RecordHistoryEntryInput): Promise<void> {
+  const visitorId = await getOrCreateVisitorId();
+  await createHistoryEntry({
+    db: getDb(),
+    visitorId,
+    query,
+    status: result.status,
+    snapshot: view,
+    corpusVersionIds: result.legalActVersionIds,
+  });
+}
 
 /**
  * Server Action backing the /explorer search UI. All OpenAI/database/legal-answer logic
@@ -19,5 +27,14 @@ const deps: RunExplorerQueryDeps = {
  * a safe error message via `ExplorerSearchResult`, never raw pipeline internals or secrets.
  */
 export async function submitExplorerQuery(query: string): Promise<ExplorerSearchResult> {
+  const env = getServerEnv();
+
+  const deps: RunExplorerQueryDeps = {
+    getLegalActVersionIds: () => parseExplorerTestCorpusVersionIds(env.EXPLORER_TEST_LEGAL_ACT_VERSION_IDS),
+    answerLegalProblem,
+    getDb,
+    recordHistoryEntry: env.EXPLORER_HISTORY_ENABLED ? recordHistoryEntry : undefined,
+  };
+
   return runExplorerQuery(query, deps);
 }

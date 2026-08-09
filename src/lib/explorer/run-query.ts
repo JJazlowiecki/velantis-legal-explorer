@@ -1,12 +1,27 @@
-import type { answerLegalProblem, AnswerLegalProblemOptions } from "@/lib/legal/answer/answer";
+import type { answerLegalProblem, AnswerLegalProblemOptions, LegalAnswerResult } from "@/lib/legal/answer/answer";
 import { mapErrorToSafeMessage } from "./errors";
 import { validateExplorerQuery } from "./query-validation";
-import { toExplorerAnswerView, type ExplorerSearchResult } from "./view-model";
+import { toExplorerAnswerView, type ExplorerAnswerView, type ExplorerSearchResult } from "./view-model";
+
+export interface RecordHistoryEntryInput {
+  query: string;
+  result: LegalAnswerResult;
+  view: ExplorerAnswerView;
+}
+
+export type RecordHistoryEntryFn = (input: RecordHistoryEntryInput) => Promise<void>;
 
 export interface RunExplorerQueryDeps {
   getLegalActVersionIds: () => string[];
   answerLegalProblem: typeof answerLegalProblem;
   getDb: () => AnswerLegalProblemOptions["db"];
+  /**
+   * Optional: undefined means history is disabled (or not wired up) and no write is
+   * attempted at all. When present, a write failure is caught and logged but NEVER changes
+   * the `ExplorerSearchResult` returned to the caller — a successfully generated legal
+   * answer must never be replaced by a history-persistence error.
+   */
+  recordHistoryEntry?: RecordHistoryEntryFn;
 }
 
 /**
@@ -23,16 +38,15 @@ export async function runExplorerQuery(rawQuery: unknown, deps: RunExplorerQuery
     return { ok: false, error: validation.error };
   }
 
+  let result: LegalAnswerResult;
   try {
     const legalActVersionIds = deps.getLegalActVersionIds();
 
-    const result = await deps.answerLegalProblem({
+    result = await deps.answerLegalProblem({
       problemDescription: validation.query,
       legalActVersionIds,
       db: deps.getDb(),
     });
-
-    return { ok: true, data: toExplorerAnswerView(result) };
   } catch (error) {
     console.error(
       "[explorer] runExplorerQuery failed:",
@@ -40,4 +54,23 @@ export async function runExplorerQuery(rawQuery: unknown, deps: RunExplorerQuery
     );
     return { ok: false, error: mapErrorToSafeMessage(error) };
   }
+
+  const view = toExplorerAnswerView(result);
+
+  // History is only ever recorded for a pipeline that actually completed (answered or
+  // insufficient_evidence) — input-validation failures, OpenAI/config/search errors never
+  // reach this point (they returned early above). A history write failure is swallowed here:
+  // the user still gets the answer they were just given.
+  if (deps.recordHistoryEntry) {
+    try {
+      await deps.recordHistoryEntry({ query: validation.query, result, view });
+    } catch (error) {
+      console.error(
+        "[explorer] history write failed (answer still returned to the user):",
+        error instanceof Error ? `${error.name}: ${error.message}` : "unknown error",
+      );
+    }
+  }
+
+  return { ok: true, data: view };
 }

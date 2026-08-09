@@ -152,4 +152,75 @@ describe("runExplorerQuery", () => {
 
     await expect(runExplorerQuery("jakiś problem prawny", deps)).resolves.toMatchObject({ ok: false });
   });
+
+  describe("history recording", () => {
+    it("records history for an answered result", async () => {
+      const recordHistoryEntry = vi.fn().mockResolvedValue(undefined);
+      const deps = fakeDeps({
+        answerLegalProblem: vi.fn().mockResolvedValue(baseResult({ status: "answered" })),
+        recordHistoryEntry,
+      });
+
+      await runExplorerQuery("jakiś problem prawny", deps);
+
+      expect(recordHistoryEntry).toHaveBeenCalledTimes(1);
+      expect(recordHistoryEntry).toHaveBeenCalledWith(
+        expect.objectContaining({ query: "jakiś problem prawny", result: expect.objectContaining({ status: "answered" }) }),
+      );
+    });
+
+    it("records history for an insufficient_evidence result", async () => {
+      const recordHistoryEntry = vi.fn().mockResolvedValue(undefined);
+      const deps = fakeDeps({
+        answerLegalProblem: vi.fn().mockResolvedValue(baseResult({ status: "insufficient_evidence" })),
+        recordHistoryEntry,
+      });
+
+      await runExplorerQuery("jakiś problem prawny", deps);
+
+      expect(recordHistoryEntry).toHaveBeenCalledTimes(1);
+      expect(recordHistoryEntry).toHaveBeenCalledWith(expect.objectContaining({ result: expect.objectContaining({ status: "insufficient_evidence" }) }));
+    });
+
+    it("does not record history when the pipeline errors before producing a result", async () => {
+      const recordHistoryEntry = vi.fn().mockResolvedValue(undefined);
+      const deps = fakeDeps({
+        answerLegalProblem: vi.fn().mockRejectedValue(new LegalIssueInvestigationError("boom")),
+        recordHistoryEntry,
+      });
+
+      await runExplorerQuery("jakiś problem prawny", deps);
+
+      expect(recordHistoryEntry).not.toHaveBeenCalled();
+    });
+
+    it("does not record history when input validation fails", async () => {
+      const recordHistoryEntry = vi.fn().mockResolvedValue(undefined);
+      const deps = fakeDeps({ recordHistoryEntry });
+
+      await runExplorerQuery("", deps);
+
+      expect(recordHistoryEntry).not.toHaveBeenCalled();
+      expect(deps.answerLegalProblem).not.toHaveBeenCalled();
+    });
+
+    it("does not attempt to record history when recordHistoryEntry is undefined (history disabled)", async () => {
+      const deps = fakeDeps({ recordHistoryEntry: undefined });
+      const result = await runExplorerQuery("jakiś problem prawny", deps);
+      expect(result.ok).toBe(true);
+    });
+
+    it("a history write failure does not change the returned result — the user still gets their answer", async () => {
+      const recordHistoryEntry = vi.fn().mockRejectedValue(new Error("db connection lost"));
+      const deps = fakeDeps({
+        answerLegalProblem: vi.fn().mockResolvedValue(baseResult({ status: "answered", answer: "Prawdziwa odpowiedź." })),
+        recordHistoryEntry,
+      });
+
+      const result = await runExplorerQuery("jakiś problem prawny", deps);
+
+      expect(recordHistoryEntry).toHaveBeenCalledTimes(1);
+      expect(result).toEqual({ ok: true, data: expect.objectContaining({ status: "answered", answer: "Prawdziwa odpowiedź." }) });
+    });
+  });
 });
