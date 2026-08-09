@@ -199,3 +199,57 @@ export const explorerHistoryEntries = pgTable(
 		index("explorer_history_entries_visitor_id_created_at_idx").on(table.visitorId, table.createdAt),
 	],
 );
+
+/**
+ * Real persisted /explorer Saved folders, scoped by the same anonymous `visitor_id` as
+ * History (see src/lib/explorer/history/visitor.ts) — deliberately the same ownership
+ * mechanism, not a second identity. No nested folders in this milestone. Case-insensitive
+ * duplicate-name rejection and the folder-count limit are enforced in service logic
+ * (src/lib/explorer/saved/service.ts), not via a DB constraint, to keep this migration simple.
+ */
+export const explorerSavedFolders = pgTable(
+	"explorer_saved_folders",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		visitorId: uuid("visitor_id").notNull(),
+		name: text("name").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => [index("explorer_saved_folders_visitor_id_idx").on(table.visitorId)],
+);
+
+/**
+ * Real persisted /explorer Saved items — answers, searches, and individual provisions. Each
+ * row carries its OWN validated, sanitized snapshot (see src/lib/explorer/saved/snapshot.ts);
+ * it never depends on a History row surviving forever (History may later gain retention/
+ * deletion). `folderId` is nullable and `onDelete: "set null"` so deleting a folder unfiles
+ * its items instead of deleting them. `contentKey` is a deterministic per-kind fingerprint
+ * (src/lib/explorer/saved/content-key.ts) used for duplicate-save detection: unique per
+ * visitor+kind+contentKey, enforced by the DB as the final safety net alongside the
+ * application-level advisory-lock transaction that also enforces quota (see service.ts).
+ */
+export const explorerSavedItems = pgTable(
+	"explorer_saved_items",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		visitorId: uuid("visitor_id").notNull(),
+		folderId: uuid("folder_id").references(() => explorerSavedFolders.id, { onDelete: "set null" }),
+		kind: text("kind").notNull(),
+		title: text("title").notNull(),
+		query: text("query"),
+		contentKey: text("content_key").notNull(),
+		snapshot: jsonb("snapshot").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => [
+		index("explorer_saved_items_visitor_id_created_at_idx").on(table.visitorId, table.createdAt),
+		index("explorer_saved_items_visitor_id_folder_id_idx").on(table.visitorId, table.folderId),
+		uniqueIndex("explorer_saved_items_visitor_kind_content_key_uidx").on(
+			table.visitorId,
+			table.kind,
+			table.contentKey,
+		),
+	],
+);

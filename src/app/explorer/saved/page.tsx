@@ -1,10 +1,13 @@
 import { AppShell } from "@/components/layout/app-shell";
 import { SavedPageContent } from "@/components/explorer/pages/saved-page-content";
+import { listSaved } from "@/app/explorer/saved/actions";
 
-export default function ExplorerSavedPage() {
+export default async function ExplorerSavedPage() {
+  const initial = await listSaved();
+
   return (
     <AppShell>
-      <SavedPageContent />
+      <SavedPageContent initialItems={initial.items} initialFolders={initial.folders} initialUsage={initial.usage} />
     </AppShell>
   );
 }

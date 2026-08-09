@@ -1,14 +1,114 @@
-import { CircleAlert, FileText, ShieldAlert, TriangleAlert } from "lucide-react";
+"use client";
 
-import type { ExplorerSearchResult } from "@/lib/explorer/view-model";
+import { useState, useTransition } from "react";
+import { Bookmark, BookmarkCheck, CircleAlert, FileText, ShieldAlert, TriangleAlert } from "lucide-react";
+
+import {
+  saveAnswerFromHistory,
+  saveAnswerFromPayload,
+  saveProvisionFromHistory,
+  saveProvisionFromPayload,
+  type SaveOutcome,
+} from "@/app/explorer/saved/actions";
+import type { ExplorerAnswerView, ExplorerCitedSource, ExplorerSearchResult } from "@/lib/explorer/view-model";
 import { cn } from "@/lib/utils";
+
+/** Present whenever the caller can offer real Save actions — omit entirely to render read-only (no Save UI at all). */
+export interface ExplorerSaveContext {
+  /** When known (the common case: the search was just recorded, or this IS a history entry), Save reads its own server-side snapshot — never re-sends answer JSON from the browser. */
+  historyEntryId?: string;
+  query: string;
+}
 
 interface ExplorerResultProps {
   result: ExplorerSearchResult;
   className?: string;
+  saveContext?: ExplorerSaveContext;
 }
 
-export function ExplorerResult({ result, className }: ExplorerResultProps) {
+type SaveButtonState = { kind: "idle" } | { kind: "pending" } | { kind: "done"; outcome: SaveOutcome };
+
+function saveButtonLabel(state: SaveButtonState, idleLabel: string): string {
+  if (state.kind === "pending") return "Zapisywanie…";
+  if (state.kind === "done") {
+    if (state.outcome.status === "created") return "Zapisano";
+    if (state.outcome.status === "already_saved") return "Już zapisane";
+    if (state.outcome.status === "quota_exceeded") return "Limit zapisanych osiągnięty";
+    return "Nie udało się zapisać";
+  }
+  return idleLabel;
+}
+
+function SaveAnswerButton({ saveContext, data }: { saveContext: ExplorerSaveContext; data: ExplorerAnswerView }) {
+  const [state, setState] = useState<SaveButtonState>({ kind: "idle" });
+  const [isPending, startTransition] = useTransition();
+
+  function handleClick() {
+    if (isPending || state.kind === "pending") return;
+    setState({ kind: "pending" });
+    startTransition(async () => {
+      const outcome = saveContext.historyEntryId
+        ? await saveAnswerFromHistory(saveContext.historyEntryId)
+        : await saveAnswerFromPayload(saveContext.query, data);
+      setState({ kind: "done", outcome });
+    });
+  }
+
+  const saved = state.kind === "done" && (state.outcome.status === "created" || state.outcome.status === "already_saved");
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={isPending || saved}
+      className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-secondary px-2.5 py-1.5 text-xs font-medium text-foreground transition hover:bg-hover-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-70"
+    >
+      {saved ? <BookmarkCheck className="h-3.5 w-3.5" aria-hidden="true" /> : <Bookmark className="h-3.5 w-3.5" aria-hidden="true" />}
+      {saveButtonLabel(state, "Zapisz odpowiedź")}
+    </button>
+  );
+}
+
+function SaveProvisionButton({
+  saveContext,
+  source,
+  sourceIndex,
+}: {
+  saveContext: ExplorerSaveContext;
+  source: ExplorerCitedSource;
+  sourceIndex: number;
+}) {
+  const [state, setState] = useState<SaveButtonState>({ kind: "idle" });
+  const [isPending, startTransition] = useTransition();
+
+  function handleClick() {
+    if (isPending || state.kind === "pending") return;
+    setState({ kind: "pending" });
+    startTransition(async () => {
+      const outcome = saveContext.historyEntryId
+        ? await saveProvisionFromHistory(saveContext.historyEntryId, sourceIndex)
+        : await saveProvisionFromPayload(source);
+      setState({ kind: "done", outcome });
+    });
+  }
+
+  const saved = state.kind === "done" && (state.outcome.status === "created" || state.outcome.status === "already_saved");
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={isPending || saved}
+      aria-label="Zapisz przepis"
+      title={saveButtonLabel(state, "Zapisz przepis")}
+      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:bg-hover-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed"
+    >
+      {saved ? <BookmarkCheck className="h-3.5 w-3.5" aria-hidden="true" /> : <Bookmark className="h-3.5 w-3.5" aria-hidden="true" />}
+    </button>
+  );
+}
+
+export function ExplorerResult({ result, className, saveContext }: ExplorerResultProps) {
   if (!result.ok) {
     return (
       <div
@@ -28,13 +128,19 @@ export function ExplorerResult({ result, className }: ExplorerResultProps) {
   }
 
   const { data } = result;
+  const effectiveSaveContext: ExplorerSaveContext | undefined = saveContext
+    ? { historyEntryId: saveContext.historyEntryId ?? result.historyEntryId, query: saveContext.query }
+    : undefined;
 
   return (
     <div className={cn("flex flex-col gap-5", className)}>
       <article className="rounded-2xl border border-border bg-surface p-5 shadow-[0_24px_34px_-28px_rgba(0,0,0,0.95)]">
-        <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
-          {data.status === "answered" ? "Odpowiedź Velantis" : "Brak wystarczających podstaw"}
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+            {data.status === "answered" ? "Odpowiedź Velantis" : "Brak wystarczających podstaw"}
+          </p>
+          {effectiveSaveContext ? <SaveAnswerButton saveContext={effectiveSaveContext} data={data} /> : null}
+        </div>
         <p className="mt-3 whitespace-pre-line text-sm leading-6 text-foreground">{data.answer}</p>
       </article>
 
@@ -45,11 +151,16 @@ export function ExplorerResult({ result, className }: ExplorerResultProps) {
             Źródła
           </p>
           <ul className="mt-3 space-y-3">
-            {data.citedSources.map((source) => (
+            {data.citedSources.map((source, sourceIndex) => (
               <li key={`${source.actTitle}::${source.citationLabel}`} className="rounded-lg border border-border p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-sm font-medium text-foreground">{source.citationLabel}</span>
-                  <span className="text-xs text-muted-foreground">{source.actTitle}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">{source.actTitle}</span>
+                    {effectiveSaveContext ? (
+                      <SaveProvisionButton saveContext={effectiveSaveContext} source={source} sourceIndex={sourceIndex} />
+                    ) : null}
+                  </div>
                 </div>
                 <p className="mt-2 text-sm leading-6 text-muted-foreground">{source.text}</p>
                 {source.isNonAuthoritative || source.isCurrentnessUnproven ? (

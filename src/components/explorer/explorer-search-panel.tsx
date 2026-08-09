@@ -7,7 +7,7 @@ import { ExplorerResult } from "@/components/explorer/explorer-result";
 import { SearchBox } from "@/components/search-box";
 import type { ExplorerSearchResult } from "@/lib/explorer/view-model";
 
-type ExplorerUiState = { kind: "idle" } | { kind: "result"; result: ExplorerSearchResult };
+type ExplorerUiState = { kind: "idle" } | { kind: "result"; result: ExplorerSearchResult; submittedQuery: string };
 
 interface ExplorerSearchPanelProps {
   /** Prefilled from ?q= when arriving via "Kontynuuj wyszukiwanie" on /explorer/history — otherwise empty, and /explorer works exactly as before. */
@@ -27,7 +27,7 @@ export function ExplorerSearchPanel({ initialQuery = "" }: ExplorerSearchPanelPr
 
     startTransition(async () => {
       const result = await submitExplorerQuery(value);
-      setState({ kind: "result", result });
+      setState({ kind: "result", result, submittedQuery: value });
     });
   }
 
@@ -43,7 +43,9 @@ export function ExplorerSearchPanel({ initialQuery = "" }: ExplorerSearchPanelPr
         loading={isPending}
       />
 
-      {state.kind === "result" ? <ExplorerResult className="mt-8" result={state.result} /> : null}
+      {state.kind === "result" ? (
+        <ExplorerResult className="mt-8" result={state.result} saveContext={{ query: state.submittedQuery }} />
+      ) : null}
     </div>
   );
 }

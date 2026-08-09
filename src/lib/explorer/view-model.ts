@@ -35,7 +35,9 @@ export interface ExplorerAnswerView {
   clarificationQuestion: string | null;
 }
 
-export type ExplorerSearchResult = { ok: true; data: ExplorerAnswerView } | { ok: false; error: string };
+export type ExplorerSearchResult =
+  | { ok: true; data: ExplorerAnswerView; historyEntryId?: string }
+  | { ok: false; error: string };
 
 /** Only sources actually cited by a verified conclusion or alternative path — not the full packed evidence set. */
 function selectCitedSources(result: LegalAnswerResult): ExplorerCitedSource[] {

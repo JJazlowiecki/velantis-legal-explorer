@@ -155,7 +155,7 @@ describe("runExplorerQuery", () => {
 
   describe("history recording", () => {
     it("records history for an answered result", async () => {
-      const recordHistoryEntry = vi.fn().mockResolvedValue(undefined);
+      const recordHistoryEntry = vi.fn().mockResolvedValue({ id: "fake-history-entry-id" });
       const deps = fakeDeps({
         answerLegalProblem: vi.fn().mockResolvedValue(baseResult({ status: "answered" })),
         recordHistoryEntry,
@@ -170,7 +170,7 @@ describe("runExplorerQuery", () => {
     });
 
     it("records history for an insufficient_evidence result", async () => {
-      const recordHistoryEntry = vi.fn().mockResolvedValue(undefined);
+      const recordHistoryEntry = vi.fn().mockResolvedValue({ id: "fake-history-entry-id" });
       const deps = fakeDeps({
         answerLegalProblem: vi.fn().mockResolvedValue(baseResult({ status: "insufficient_evidence" })),
         recordHistoryEntry,
@@ -183,7 +183,7 @@ describe("runExplorerQuery", () => {
     });
 
     it("does not record history when the pipeline errors before producing a result", async () => {
-      const recordHistoryEntry = vi.fn().mockResolvedValue(undefined);
+      const recordHistoryEntry = vi.fn().mockResolvedValue({ id: "fake-history-entry-id" });
       const deps = fakeDeps({
         answerLegalProblem: vi.fn().mockRejectedValue(new LegalIssueInvestigationError("boom")),
         recordHistoryEntry,
@@ -195,7 +195,7 @@ describe("runExplorerQuery", () => {
     });
 
     it("does not record history when input validation fails", async () => {
-      const recordHistoryEntry = vi.fn().mockResolvedValue(undefined);
+      const recordHistoryEntry = vi.fn().mockResolvedValue({ id: "fake-history-entry-id" });
       const deps = fakeDeps({ recordHistoryEntry });
 
       await runExplorerQuery("", deps);
@@ -221,6 +221,28 @@ describe("runExplorerQuery", () => {
 
       expect(recordHistoryEntry).toHaveBeenCalledTimes(1);
       expect(result).toEqual({ ok: true, data: expect.objectContaining({ status: "answered", answer: "Prawdziwa odpowiedź." }) });
+      expect((result as { historyEntryId?: string }).historyEntryId).toBeUndefined();
+    });
+
+    it("includes the returned historyEntryId in the result so callers can Save from it without resending answer JSON", async () => {
+      const recordHistoryEntry = vi.fn().mockResolvedValue({ id: "real-history-entry-id" });
+      const deps = fakeDeps({
+        answerLegalProblem: vi.fn().mockResolvedValue(baseResult({ status: "answered" })),
+        recordHistoryEntry,
+      });
+
+      const result = await runExplorerQuery("jakiś problem prawny", deps);
+
+      expect(result.ok).toBe(true);
+      expect((result as { historyEntryId?: string }).historyEntryId).toBe("real-history-entry-id");
+    });
+
+    it("omits historyEntryId when history recording is disabled", async () => {
+      const deps = fakeDeps({ recordHistoryEntry: undefined });
+      const result = await runExplorerQuery("jakiś problem prawny", deps);
+
+      expect(result.ok).toBe(true);
+      expect((result as { historyEntryId?: string }).historyEntryId).toBeUndefined();
     });
   });
 });

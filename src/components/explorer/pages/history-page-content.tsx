@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
-import { Calendar, Eye, FileText, MessageSquare, Search, Trash2 } from "lucide-react";
+import { useMemo, useState, useTransition } from "react";
+import { Bookmark, BookmarkCheck, Calendar, Eye, FileText, MessageSquare, Search, Trash2 } from "lucide-react";
 
 import { clearExplorerHistory, deleteExplorerHistoryEntry, listExplorerHistory } from "@/app/explorer/history/actions";
+import { saveAnswerFromHistory, saveSearchFromHistory, type SaveOutcome } from "@/app/explorer/saved/actions";
 import { FormSelect } from "@/components/explorer/form-select";
 import { Modal } from "@/components/explorer/modal";
 import { Panel } from "@/components/explorer/panel";
@@ -36,6 +37,62 @@ interface HistoryPageContentProps {
 
 function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString("pl-PL", { dateStyle: "medium", timeStyle: "short" });
+}
+
+type SaveState = { kind: "idle" } | { kind: "pending" } | { kind: "done"; outcome: SaveOutcome };
+
+function saveTitle(state: SaveState, idleLabel: string): string {
+  if (state.kind === "pending") return "Zapisywanie…";
+  if (state.kind === "done") {
+    if (state.outcome.status === "created") return "Zapisano";
+    if (state.outcome.status === "already_saved") return "Już zapisane";
+    if (state.outcome.status === "quota_exceeded") return "Limit zapisanych osiągnięty";
+    return "Nie udało się zapisać";
+  }
+  return idleLabel;
+}
+
+/** One history row's "Zapisz odpowiedź" / "Zapisz wyszukiwanie" icon buttons — real Saves, using the server-validated history entry, never re-running the pipeline. */
+function HistorySaveButtons({ historyEntryId }: { historyEntryId: string }) {
+  const [answerState, setAnswerState] = useState<SaveState>({ kind: "idle" });
+  const [searchState, setSearchState] = useState<SaveState>({ kind: "idle" });
+  const [isPending, startTransition] = useTransition();
+
+  const answerSaved = answerState.kind === "done" && (answerState.outcome.status === "created" || answerState.outcome.status === "already_saved");
+  const searchSaved = searchState.kind === "done" && (searchState.outcome.status === "created" || searchState.outcome.status === "already_saved");
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          if (isPending || answerSaved) return;
+          setAnswerState({ kind: "pending" });
+          startTransition(async () => setAnswerState({ kind: "done", outcome: await saveAnswerFromHistory(historyEntryId) }));
+        }}
+        disabled={isPending || answerSaved}
+        aria-label="Zapisz odpowiedź"
+        title={saveTitle(answerState, "Zapisz odpowiedź")}
+        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:bg-hover-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed"
+      >
+        {answerSaved ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+      </button>
+      <button
+        type="button"
+        onClick={() => {
+          if (isPending || searchSaved) return;
+          setSearchState({ kind: "pending" });
+          startTransition(async () => setSearchState({ kind: "done", outcome: await saveSearchFromHistory(historyEntryId) }));
+        }}
+        disabled={isPending || searchSaved}
+        aria-label="Zapisz wyszukiwanie"
+        title={saveTitle(searchState, "Zapisz wyszukiwanie")}
+        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:bg-hover-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed"
+      >
+        {searchSaved ? <BookmarkCheck className="h-4 w-4" /> : <Search className="h-4 w-4" />}
+      </button>
+    </>
+  );
 }
 
 export function HistoryPageContent({ initialEntries, historyEnabled }: HistoryPageContentProps) {
@@ -206,6 +263,7 @@ export function HistoryPageContent({ initialEntries, historyEnabled }: HistoryPa
                     </div>
 
                     <div className="flex shrink-0 items-center gap-1.5">
+                      <HistorySaveButtons historyEntryId={item.id} />
                       <button
                         type="button"
                         onClick={() => setDetailsItem(item)}

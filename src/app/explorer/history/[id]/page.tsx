@@ -49,7 +49,7 @@ export default async function ExplorerHistoryEntryPage({ params }: { params: Pro
           <h1 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">{entry.query}</h1>
         </div>
 
-        <ExplorerResult result={{ ok: true, data: entry.snapshot }} />
+        <ExplorerResult result={{ ok: true, data: entry.snapshot }} saveContext={{ historyEntryId: id, query: entry.query }} />
       </div>
     </AppShell>
   );
