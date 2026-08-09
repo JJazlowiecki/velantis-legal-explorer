@@ -20,6 +20,10 @@ export const serverEnvSchema = z.object({
     .min(-1, "LEGAL_SEARCH_MIN_VECTOR_SIMILARITY must be >= -1")
     .max(1, "LEGAL_SEARCH_MIN_VECTOR_SIMILARITY must be <= 1")
     .default(0.35),
+  // Server-only, comma-separated legalActVersion UUIDs for the local /explorer technical
+  // test corpus (see src/lib/explorer/corpus-config.ts). Never a global/default corpus —
+  // missing or empty configuration is a hard error at the point of use, not silently ignored.
+  EXPLORER_TEST_LEGAL_ACT_VERSION_IDS: z.string().optional(),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

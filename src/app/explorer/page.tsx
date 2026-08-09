@@ -1,6 +1,7 @@
 import { AppShell } from "@/components/layout/app-shell";
 import { ExampleQuery } from "@/components/example-query";
-import { SearchBox } from "@/components/search-box";
+import { ExplorerSearchPanel } from "@/components/explorer/explorer-search-panel";
+import { TestCorpusNotice } from "@/components/explorer/test-corpus-notice";
 
 const exampleQuestions = [
   "Kiedy przedawnia się roszczenie?",
@@ -26,11 +27,12 @@ export default function ExplorerPage() {
           Czego szukasz?
         </h1>
 
-        <div className="mt-10 w-full max-w-3xl">
-          <SearchBox
-            placeholder="Zapytaj o przepis, zagadnienie lub problem..."
-            buttonLabel="Uruchom wyszukiwanie"
-          />
+        <div className="mt-6 w-full max-w-3xl">
+          <TestCorpusNotice />
+        </div>
+
+        <div className="mt-6 w-full max-w-3xl">
+          <ExplorerSearchPanel />
         </div>
 
         <div className="mt-8 grid w-full max-w-3xl gap-3 md:grid-cols-2">
