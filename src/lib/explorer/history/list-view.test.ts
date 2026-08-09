@@ -18,8 +18,8 @@ function record(overrides: Partial<HistoryEntryRecord> = {}): HistoryEntryRecord
       alternativePaths: [],
       uncertainties: [],
       citedSources: [
-        { actTitle: "Ustawa", citationLabel: "art. 1", text: "Treść", isNonAuthoritative: false, isCurrentnessUnproven: true },
-        { actTitle: "Ustawa", citationLabel: "art. 2", text: "Treść", isNonAuthoritative: false, isCurrentnessUnproven: true },
+        { actTitle: "Ustawa", citationLabel: "art. 1", text: "Treść", isNonAuthoritative: false, isCurrentnessUnproven: true, provenCurrentAsOf: null },
+        { actTitle: "Ustawa", citationLabel: "art. 2", text: "Treść", isNonAuthoritative: false, isCurrentnessUnproven: true, provenCurrentAsOf: null },
       ],
       clarificationQuestion: null,
     },

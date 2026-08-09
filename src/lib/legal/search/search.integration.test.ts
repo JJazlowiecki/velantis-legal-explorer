@@ -350,6 +350,47 @@ describeDatabase("legal search infrastructure", () => {
     expect(scopedToHistorical).toEqual([]);
   });
 
+  it("surfaces a lexical candidate for a full natural-language question sharing multiple (not literally all) words with the document, via partial-term overlap — regression for a real observed retrieval failure", async () => {
+    const { currentVersion, art471 } = await seedFixture();
+    if (!db) throw new Error("unreachable");
+    await indexLegalSearchDocuments(currentVersion.id, { db, embedTexts: fakeEmbed });
+
+    // art471's text is "Art. 471. KEYWORD_ALPHA Dłużnik obowiązany jest do naprawienia szkody
+    // wynikłej z niewykonania zobowiązania." — this ordinary-language question shares several
+    // content words with it ("obowiązany", "naprawienia", "szkody", "niewykonania",
+    // "zobowiązania") but NOT every word ("kto", "jest", "za", "do" mismatch/extra), so the
+    // OLD `websearch_to_tsquery` AND-of-every-word semantics would match nothing (confirmed
+    // during the live investigation this test guards against) — restoring real partial-overlap
+    // recall for natural sentences was the actual fix, not a corpus/query-generation change.
+    const candidates = await lexicalSearch({
+      db,
+      legalActVersionIds: [currentVersion.id],
+      query: "kto jest obowiązany do naprawienia szkody za niewykonanie zobowiązania",
+    });
+
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates[0].legalProvisionId).toBe(art471.id);
+  });
+
+  it("does NOT match on a single incidental shared word alone — at least two query terms must co-occur", async () => {
+    const { currentVersion } = await seedFixture();
+    if (!db) throw new Error("unreachable");
+    await indexLegalSearchDocuments(currentVersion.id, { db, embedTexts: fakeEmbed });
+
+    // Shares only the single word "prawa" with art. 5 § 1's "...jest to nadużycie prawa." —
+    // must not unconditionally survive as a lexical match on that one incidental overlap alone
+    // (see rank.ts: a lexical match bypasses the minimum vector-similarity quality guard
+    // entirely, so lexical search degrading into "any one shared word counts" would let a
+    // single common term pad results regardless of actual relevance).
+    const candidates = await lexicalSearch({
+      db,
+      legalActVersionIds: [currentVersion.id],
+      query: "zupełnie inny temat niezwiązany z prawa",
+    });
+
+    expect(candidates).toEqual([]);
+  });
+
   it("vector search returns nearest neighbors scoped to the explicit corpus", async () => {
     const { currentVersion, art471 } = await seedFixture();
     if (!db) throw new Error("unreachable");

@@ -14,6 +14,7 @@ function sourceRef(overrides: Partial<ResolvedSourceReference> = {}): ResolvedSo
     versionKind: "promulgated",
     authorityClass: "authoritative",
     currentnessStatus: "unproven",
+    provenCurrentAsOf: null,
     sourceExpressionId: "ogl",
     ...overrides,
   };
@@ -32,6 +33,7 @@ function packedSource(overrides: Partial<PackedSource> = {}): PackedSource {
     versionKind: "promulgated",
     authorityClass: "authoritative",
     currentnessStatus: "unproven",
+    provenCurrentAsOf: null,
     sourceExpressionId: "ogl",
     ...overrides,
   };
@@ -122,11 +124,15 @@ describe("toExplorerAnswerView", () => {
     expect(view.citedSources[0].isCurrentnessUnproven).toBe(true);
   });
 
-  it("does not mark a proven-current, authoritative source with any warning flag", () => {
-    const clean = packedSource({
-      legalProvisionId: "p-clean",
+  it("currentnessStatus alone never marks a source as current — only provenCurrentAsOf does, and it stays unproven without it", () => {
+    // currentnessStatus is never actually "proven_current" anywhere in this pipeline (nothing
+    // sets it), but even if a source somehow carried that value, only provenCurrentAsOf (set
+    // exclusively via a resolved current-law-corpus run) may suppress the warning flag.
+    const stillUnproven = packedSource({
+      legalProvisionId: "p-still-unproven",
       authorityClass: "authoritative",
       currentnessStatus: "proven_current",
+      provenCurrentAsOf: null,
     });
 
     const view = toExplorerAnswerView(
@@ -134,7 +140,45 @@ describe("toExplorerAnswerView", () => {
         conclusions: [
           {
             statement: "Teza.",
-            support: [sourceRef({ legalProvisionId: "p-clean", authorityClass: "authoritative", currentnessStatus: "proven_current" })],
+            support: [
+              sourceRef({
+                legalProvisionId: "p-still-unproven",
+                authorityClass: "authoritative",
+                currentnessStatus: "proven_current",
+                provenCurrentAsOf: null,
+              }),
+            ],
+          },
+        ],
+        sources: [stillUnproven],
+      }),
+    );
+
+    expect(view.citedSources[0].isNonAuthoritative).toBe(false);
+    expect(view.citedSources[0].isCurrentnessUnproven).toBe(true);
+  });
+
+  it("does not mark an authoritative source with a resolved provenCurrentAsOf with any warning flag, and exposes the effectiveAsOf date", () => {
+    const clean = packedSource({
+      legalProvisionId: "p-clean",
+      authorityClass: "authoritative",
+      currentnessStatus: "unproven",
+      provenCurrentAsOf: "2026-08-09",
+    });
+
+    const view = toExplorerAnswerView(
+      baseResult({
+        conclusions: [
+          {
+            statement: "Teza.",
+            support: [
+              sourceRef({
+                legalProvisionId: "p-clean",
+                authorityClass: "authoritative",
+                currentnessStatus: "unproven",
+                provenCurrentAsOf: "2026-08-09",
+              }),
+            ],
           },
         ],
         sources: [clean],
@@ -143,6 +187,7 @@ describe("toExplorerAnswerView", () => {
 
     expect(view.citedSources[0].isNonAuthoritative).toBe(false);
     expect(view.citedSources[0].isCurrentnessUnproven).toBe(false);
+    expect(view.citedSources[0].provenCurrentAsOf).toBe("2026-08-09");
   });
 
   it("never exposes internal implementation fields (sourceId, legalProvisionId, versionKind, etc.) on cited sources", () => {
@@ -154,7 +199,9 @@ describe("toExplorerAnswerView", () => {
     );
 
     const keys = Object.keys(view.citedSources[0]);
-    expect(keys.sort()).toEqual(["actTitle", "citationLabel", "isCurrentnessUnproven", "isNonAuthoritative", "text"].sort());
+    expect(keys.sort()).toEqual(
+      ["actTitle", "citationLabel", "isCurrentnessUnproven", "isNonAuthoritative", "provenCurrentAsOf", "text"].sort(),
+    );
   });
 
   it("maps conclusions and alternative paths to their citation labels only (no internal SOURCE_X ids)", () => {

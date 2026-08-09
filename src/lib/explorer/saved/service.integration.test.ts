@@ -33,7 +33,7 @@ const ANSWER_SNAPSHOT: SavedAnswerSnapshot = {
   alternativePaths: [],
   uncertainties: [],
   citedSources: [
-    { actTitle: "Ustawa testowa", citationLabel: "art. 1", text: "Treść.", isNonAuthoritative: false, isCurrentnessUnproven: true },
+    { actTitle: "Ustawa testowa", citationLabel: "art. 1", text: "Treść.", isNonAuthoritative: false, isCurrentnessUnproven: true, provenCurrentAsOf: null },
   ],
   clarificationQuestion: null,
 };
@@ -46,6 +46,7 @@ const PROVISION_SNAPSHOT: SavedProvisionSnapshot = {
   text: "Treść przepisu.",
   isNonAuthoritative: false,
   isCurrentnessUnproven: true,
+  provenCurrentAsOf: null,
 };
 
 afterAll(async () => {

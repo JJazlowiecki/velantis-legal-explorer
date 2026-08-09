@@ -176,6 +176,11 @@ export function ExplorerResult({ result, className, saveContext }: ExplorerResul
                     </span>
                   </p>
                 ) : null}
+                {!source.isCurrentnessUnproven && source.provenCurrentAsOf ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Aktualne na dzień {source.provenCurrentAsOf} (wg zweryfikowanego korpusu aktualnego prawa).
+                  </p>
+                ) : null}
               </li>
             ))}
           </ul>

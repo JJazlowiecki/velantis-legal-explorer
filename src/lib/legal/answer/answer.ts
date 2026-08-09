@@ -6,7 +6,7 @@ import { type DetectLegalIssuesFn, type DetectLegalIssuesOptions } from "../issu
 import { investigateLegalProblem } from "../issues/investigate";
 import { validateEvidenceAgainstSources } from "./evidence";
 import { generateFinalAnswer, type GenerateFinalAnswerFn, type GenerateFinalAnswerOptions } from "./generate";
-import { packSources, type PackedSource } from "./packing";
+import { packSources, type CurrentCorpusPackingContext, type PackedSource } from "./packing";
 import {
   generateRecoveryConclusions,
   type GenerateRecoveryConclusionsFn,
@@ -44,6 +44,17 @@ export interface AnswerLegalProblemOptions {
   db?: PostgresJsDatabase<typeof schema>;
   embedTexts?: EmbedTextsFn;
   minVectorSimilarity?: number;
+  /**
+   * Set ONLY when Explorer resolved a CURRENT-mode corpus for this exact query (see
+   * src/lib/explorer/corpus-config.ts's resolveCurrentCorpus / run-query.ts) — every id in
+   * `legalActVersionIds` here is, by construction of Model A (select.ts), an
+   * `authoritative_current` entry of that one pinned run. Sources whose legalActVersionId is
+   * in this set are presented as current AS OF `effectiveAsOf`, without ever mutating
+   * legal_act_versions.currentnessStatus (which stays "unproven" forever — currentness is a
+   * corpus-run-relative fact, not an immutable-version property). Omitted entirely in
+   * historical/test mode.
+   */
+  currentCorpusContext?: CurrentCorpusPackingContext;
   detectIssues?: DetectLegalIssuesFn;
   detectIssuesOptions?: DetectLegalIssuesOptions;
   generateFinalAnswer?: GenerateFinalAnswerFn;
@@ -66,6 +77,8 @@ export interface ResolvedSourceReference {
   versionKind: string;
   authorityClass: string;
   currentnessStatus: string;
+  /** See PackedSource.provenCurrentAsOf — propagated unchanged through verification. */
+  provenCurrentAsOf: string | null;
   sourceExpressionId: string;
 }
 
@@ -122,6 +135,7 @@ function resolveSupport(
       versionKind: source.versionKind,
       authorityClass: source.authorityClass,
       currentnessStatus: source.currentnessStatus,
+      provenCurrentAsOf: source.provenCurrentAsOf,
       sourceExpressionId: source.sourceExpressionId,
     };
   });
@@ -166,7 +180,10 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
     };
   }
 
-  const packedSources = packSources(investigation.retrievedProvisions, { maxSources: options.maxSources });
+  const packedSources = packSources(investigation.retrievedProvisions, {
+    maxSources: options.maxSources,
+    currentCorpusContext: options.currentCorpusContext,
+  });
   const packedBySourceId = new Map(packedSources.map((source) => [source.sourceId, source]));
 
   const generate = options.generateFinalAnswer ?? generateFinalAnswer;
@@ -571,7 +588,12 @@ function buildAuthorityCurrentnessCaveats(
 
   const caveats: string[] = [];
 
-  if (citedSources.some((source) => source.currentnessStatus !== "proven_current")) {
+  // A source counts as "confirmed current" only via provenCurrentAsOf — set exclusively when
+  // this exact query resolved a CURRENT-mode corpus run and this source's version is one of
+  // that run's authoritative_current entries (see PackedSource.provenCurrentAsOf). Checking
+  // currentnessStatus itself would never do this, since it stays "unproven" everywhere by
+  // design (see Model A / current-law-corpus milestone) — currentness is corpus-run-relative.
+  if (citedSources.some((source) => source.provenCurrentAsOf === null)) {
     caveats.push(
       "Aktualność (obowiązywanie w obecnym stanie prawnym) cytowanych przepisów nie została potwierdzona przez system — nie należy zakładać, że są to przepisy obecnie obowiązujące bez dalszej weryfikacji.",
     );
