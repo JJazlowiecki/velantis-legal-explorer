@@ -9,7 +9,11 @@ export default async function ExplorerHistoryPage() {
 
   return (
     <AppShell>
-      <HistoryPageContent initialEntries={initialEntries} historyEnabled={env.EXPLORER_HISTORY_ENABLED} />
+      <HistoryPageContent
+        initialEntries={initialEntries}
+        historyEnabled={env.EXPLORER_HISTORY_ENABLED}
+        retentionDays={env.EXPLORER_HISTORY_RETENTION_DAYS}
+      />
     </AppShell>
   );
 }
