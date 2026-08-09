@@ -9,9 +9,9 @@ import { getOrCreateVisitorId } from "@/lib/explorer/history/visitor";
 import { runExplorerQuery, type RecordHistoryEntryInput, type RunExplorerQueryDeps } from "@/lib/explorer/run-query";
 import type { ExplorerSearchResult } from "@/lib/explorer/view-model";
 
-async function recordHistoryEntry({ query, result, view }: RecordHistoryEntryInput): Promise<void> {
+async function recordHistoryEntry({ query, result, view }: RecordHistoryEntryInput): Promise<{ id: string }> {
   const visitorId = await getOrCreateVisitorId();
-  await createHistoryEntry({
+  return createHistoryEntry({
     db: getDb(),
     visitorId,
     query,

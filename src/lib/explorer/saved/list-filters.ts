@@ -1,6 +1,12 @@
-import type { SavedItem, SavedItemType } from "./saved";
+import type { SavedListItem } from "./list-view";
 
-export type SavedTab = "all" | SavedItemType;
+/**
+ * "act" is deliberately kept as a tab even though no real SavedListItem can ever have
+ * kind "act" (SavedItemKind only has answer/search/provision) — selecting it always yields
+ * the honest empty state until real Legal Acts persistence exists, with no special-casing
+ * needed here: the filter below just never matches.
+ */
+export type SavedTab = "all" | "answer" | "provision" | "act" | "search";
 
 export const SAVED_TAB_LABELS: Record<SavedTab, string> = {
   all: "Wszystkie",
@@ -20,26 +26,26 @@ export const SAVED_SORT_LABELS: Record<SavedSort, string> = {
   title_asc: "Nazwa: A–Z",
 };
 
-export interface SavedFilters {
+export interface SavedListFilters {
   tab: SavedTab;
   searchTerm: string;
   sort: SavedSort;
   folderId: string | null | "all";
 }
 
-export const DEFAULT_SAVED_FILTERS: SavedFilters = {
+export const DEFAULT_SAVED_LIST_FILTERS: SavedListFilters = {
   tab: "all",
   searchTerm: "",
   sort: "date_desc",
   folderId: "all",
 };
 
-/** Pure client-side filter + sort over the static demo saved-items list. */
-export function filterAndSortSavedItems(items: SavedItem[], filters: SavedFilters): SavedItem[] {
+/** Pure client-side filter + sort over an already-loaded, bounded Saved list. */
+export function filterAndSortSavedListItems(items: SavedListItem[], filters: SavedListFilters): SavedListItem[] {
   const term = filters.searchTerm.trim().toLowerCase();
 
   const filtered = items.filter((item) => {
-    if (filters.tab !== "all" && item.type !== filters.tab) {
+    if (filters.tab !== "all" && item.kind !== filters.tab) {
       return false;
     }
 
@@ -47,8 +53,11 @@ export function filterAndSortSavedItems(items: SavedItem[], filters: SavedFilter
       return false;
     }
 
-    if (term.length > 0 && !item.title.toLowerCase().includes(term)) {
-      return false;
+    if (term.length > 0) {
+      const haystack = `${item.title} ${item.query ?? ""}`.toLowerCase();
+      if (!haystack.includes(term)) {
+        return false;
+      }
     }
 
     return true;
@@ -58,12 +67,12 @@ export function filterAndSortSavedItems(items: SavedItem[], filters: SavedFilter
   sorted.sort((a, b) => {
     switch (filters.sort) {
       case "date_asc":
-        return a.savedDate.localeCompare(b.savedDate);
+        return a.createdAt.localeCompare(b.createdAt);
       case "title_asc":
         return a.title.localeCompare(b.title);
       case "date_desc":
       default:
-        return b.savedDate.localeCompare(a.savedDate);
+        return b.createdAt.localeCompare(a.createdAt);
     }
   });
 

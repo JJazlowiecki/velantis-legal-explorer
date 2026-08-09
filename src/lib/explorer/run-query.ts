@@ -9,7 +9,7 @@ export interface RecordHistoryEntryInput {
   view: ExplorerAnswerView;
 }
 
-export type RecordHistoryEntryFn = (input: RecordHistoryEntryInput) => Promise<void>;
+export type RecordHistoryEntryFn = (input: RecordHistoryEntryInput) => Promise<{ id: string }>;
 
 export interface RunExplorerQueryDeps {
   getLegalActVersionIds: () => string[];
@@ -60,10 +60,14 @@ export async function runExplorerQuery(rawQuery: unknown, deps: RunExplorerQuery
   // History is only ever recorded for a pipeline that actually completed (answered or
   // insufficient_evidence) — input-validation failures, OpenAI/config/search errors never
   // reach this point (they returned early above). A history write failure is swallowed here:
-  // the user still gets the answer they were just given.
+  // the user still gets the answer they were just given. The returned id (when the write
+  // succeeds) lets the client Save the exact server-validated snapshot later without ever
+  // re-sending answer JSON from the browser — see src/app/explorer/saved/actions.ts.
+  let historyEntryId: string | undefined;
   if (deps.recordHistoryEntry) {
     try {
-      await deps.recordHistoryEntry({ query: validation.query, result, view });
+      const entry = await deps.recordHistoryEntry({ query: validation.query, result, view });
+      historyEntryId = entry.id;
     } catch (error) {
       console.error(
         "[explorer] history write failed (answer still returned to the user):",
@@ -72,5 +76,5 @@ export async function runExplorerQuery(rawQuery: unknown, deps: RunExplorerQuery
     }
   }
 
-  return { ok: true, data: view };
+  return { ok: true, data: view, historyEntryId };
 }

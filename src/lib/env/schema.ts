@@ -44,6 +44,16 @@ export const serverEnvSchema = z.object({
     .enum(["true", "false"])
     .optional()
     .transform((value) => value !== "false"),
+  // Hard cap on the number of Saved items per visitor (see src/lib/explorer/saved/). Folders
+  // do not count toward this. This is a global MVP default, not a per-plan limit — the
+  // service boundary (src/lib/explorer/saved/quota.ts) accepts the resolved limit as a plain
+  // number so a future plan/subscription layer can compute a different value per visitor
+  // without changing Saved persistence at all.
+  EXPLORER_SAVED_MAX_ITEMS: z.coerce
+    .number()
+    .int("EXPLORER_SAVED_MAX_ITEMS must be an integer")
+    .positive("EXPLORER_SAVED_MAX_ITEMS must be a positive integer")
+    .default(100),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

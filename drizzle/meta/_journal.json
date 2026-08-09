@@ -57,6 +57,13 @@
       "when": 1786273612595,
       "tag": "0007_ambitious_ben_parker",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786283418336,
+      "tag": "0008_bizarre_stephen_strange",
+      "breakpoints": true
     }
   ]
 }
