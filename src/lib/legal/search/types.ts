@@ -8,6 +8,7 @@ export interface HybridSearchResult {
   hierarchy: string[];
   lexicalRank: number | null;
   vectorRank: number | null;
+  vectorSimilarity: number | null;
   isExactCitationMatch: boolean;
   finalScore: number;
   versionKind: string;

@@ -420,4 +420,96 @@ describeDatabase("legal search infrastructure", () => {
     expect(nonAuthResult.results[0].authorityClass).toBe("non_authoritative");
     expect(nonAuthResult.results[0].versionKind).toBe("unified");
   });
+
+  describe("minimum vector similarity guard", () => {
+    /** Unit vector at a controlled cosine angle from e0, so similarity to an e0-embedded
+     * document is exactly `cosineSimilarity`. Uses a high, otherwise-unused dimension for
+     * its orthogonal component so it stays orthogonal to the fixture's other basis vectors
+     * (e1/e2, used by other indexed provisions) rather than accidentally aliasing one. */
+    function unitVectorAtCosineSimilarity(cosineSimilarity: number): number[] {
+      const vector = new Array<number>(DIMENSIONS).fill(0);
+      vector[0] = cosineSimilarity;
+      vector[1000] = Math.sqrt(1 - cosineSimilarity * cosineSimilarity);
+      return vector;
+    }
+
+    it("an irrelevant query returns zero results rather than padding with unrelated provisions", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      await indexLegalSearchDocuments(currentVersion.id, { db, embedTexts: fakeEmbed });
+
+      // No lexical overlap with any fixture text, and fakeEmbed's fallback bucket (e4) is
+      // orthogonal (similarity 0) to every indexed document (e0/e1/e2) — a true negative.
+      const result = await hybridLegalSearch({
+        query: "KEYWORD_COMPLETELY_UNRELATED_NONSENSE_TOPIC",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+      });
+
+      expect(result.results).toEqual([]);
+    });
+
+    it("keeps a strong vector-only match above the configured threshold", async () => {
+      const { currentVersion, art471 } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      await indexLegalSearchDocuments(currentVersion.id, { db, embedTexts: fakeEmbed });
+
+      const result = await hybridLegalSearch({
+        query: "query text with no lexical overlap",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: async () => [unitVectorAtCosineSimilarity(0.9)],
+        minVectorSimilarity: 0.35,
+      });
+
+      const hit = result.results.find((item) => item.legalProvisionId === art471.id);
+      expect(hit).toBeDefined();
+      expect(hit?.vectorSimilarity).toBeCloseTo(0.9, 5);
+      expect(hit?.lexicalRank).toBeNull();
+      expect(hit?.isExactCitationMatch).toBe(false);
+    });
+
+    it("removes a weak vector-only match below the configured threshold", async () => {
+      const { currentVersion, art471 } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      await indexLegalSearchDocuments(currentVersion.id, { db, embedTexts: fakeEmbed });
+
+      const result = await hybridLegalSearch({
+        query: "query text with no lexical overlap",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: async () => [unitVectorAtCosineSimilarity(0.2)],
+        minVectorSimilarity: 0.35,
+      });
+
+      expect(result.results.some((item) => item.legalProvisionId === art471.id)).toBe(false);
+      expect(result.results).toEqual([]);
+    });
+
+    it("keeps a lexical match regardless of weak or missing vector similarity", async () => {
+      const { currentVersion, art471 } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      await indexLegalSearchDocuments(currentVersion.id, { db, embedTexts: fakeEmbed });
+
+      // "KEYWORD_ALPHA" is a literal lexical match for art471's indexed content, but the
+      // embedding returned here is a weak (0.1 similarity), unrelated vector.
+      const result = await hybridLegalSearch({
+        query: "KEYWORD_ALPHA",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: async () => [unitVectorAtCosineSimilarity(0.1)],
+        minVectorSimilarity: 0.35,
+      });
+
+      const hit = result.results.find((item) => item.legalProvisionId === art471.id);
+      expect(hit).toBeDefined();
+      expect(hit?.lexicalRank).not.toBeNull();
+      expect(hit?.vectorSimilarity).toBeCloseTo(0.1, 5);
+    });
+  });
 });
