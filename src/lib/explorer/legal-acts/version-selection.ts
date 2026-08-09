@@ -11,6 +11,15 @@ export interface VersionSelectionInput {
   currentnessStatus: CurrentnessStatus;
   fetchedAt: Date;
   hasStructure: boolean;
+  /**
+   * Immutable-instance provenance: set ONLY for a real, announcement-backed consolidated (tj)
+   * version (see consolidated-ingest.ts). Null for ogl/uj, and null for the legacy
+   * pre-announcement-model bare "tj" reachability alias — that alias must never be treated as
+   * though it were a real consolidated snapshot once a real one exists.
+   */
+  sourceAnnouncementLegalActId: string | null;
+  /** Official "data stanu prawnego" of an announcement-backed version, when known. Display/tie-break only — never implies currentness. */
+  legalStateDate: string | null;
 }
 
 export interface VersionSelectionResult {
@@ -21,6 +30,55 @@ export interface VersionSelectionResult {
   /** Per existing eli/expressions.ts semantics: the version retrieval/readability should prefer (UJ, else TJ, else OGL). */
   retrievalVersionId: string | null;
   warnings: string[];
+}
+
+/**
+ * Picks ONE deterministic representative among versions that share a `versionKind`. For
+ * `versionKind === "consolidated"` this now has to handle a real scenario: multiple IMMUTABLE
+ * announcement-backed tj versions coexisting for one act (see feature/current-law-corpus Phase
+ * 1), plus possibly a legacy, non-announcement-backed "tj" alias with no real content.
+ *
+ * Rule: if any real (announcement-backed) candidate exists, the legacy alias is EXCLUDED from
+ * consideration entirely — it must never outrank or stand in for a real immutable snapshot, even
+ * if the alias happens to have structure (it shouldn't, by construction of the ingestion
+ * pipelines, but this doesn't rely on that). Among real candidates (or, if none exist, among
+ * whatever's left), prefer: structured over unstructured, then the most recent official
+ * `legalStateDate`, then id as a final stable tie-break. A caller-visible warning is added
+ * whenever more than one real candidate existed, so "a choice was made among several real
+ * versions" is never silent.
+ */
+function pickRepresentative(
+  candidates: VersionSelectionInput[],
+): { representative: VersionSelectionInput; warning: string | null } | null {
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const real = candidates.filter((v) => v.sourceAnnouncementLegalActId !== null);
+  const pool = real.length > 0 ? real : candidates;
+
+  const sorted = [...pool].sort((a, b) => {
+    const structureDiff = (b.hasStructure ? 1 : 0) - (a.hasStructure ? 1 : 0);
+    if (structureDiff !== 0) return structureDiff;
+
+    const officialDiff =
+      (["ogl", "tj", "uj"].includes(b.sourceExpressionId) ? 1 : 0) -
+      (["ogl", "tj", "uj"].includes(a.sourceExpressionId) ? 1 : 0);
+    if (officialDiff !== 0) return officialDiff;
+
+    const dateDiff = (b.legalStateDate ?? "").localeCompare(a.legalStateDate ?? "");
+    if (dateDiff !== 0) return dateDiff;
+
+    return a.id.localeCompare(b.id);
+  });
+
+  const representative = sorted[0];
+  const warning =
+    real.length > 1
+      ? `Ten akt ma ${real.length} niezależne, oficjalne wersje skonsolidowane (tj) — wyświetlono wersję wg stanu prawnego na dzień: ${representative.legalStateDate ?? "nieznana"}.`
+      : null;
+
+  return { representative, warning };
 }
 
 /**
@@ -37,28 +95,22 @@ export function chooseDisplayVersion(versions: ReadonlyArray<VersionSelectionInp
     return { defaultVersionId: null, authoritativeVersionId: null, retrievalVersionId: null, warnings: [] };
   }
 
-  // chooseExpressionSelection picks at most one candidate per versionKind (via .find), so when
-  // an act has more than one version of the same kind (observed in real data — see ingestion
-  // history), pick a single deterministic representative per kind first: prefer one that has
-  // structured provisions, then the officially-recognized expression id (ogl/tj/uj) over an
-  // ad-hoc one, then the earliest fetchedAt.
-  const byKind = new Map<LegalActVersionKind, VersionSelectionInput>();
-  for (const version of [...versions].sort((a, b) => a.fetchedAt.getTime() - b.fetchedAt.getTime())) {
-    const existing = byKind.get(version.versionKind);
-    if (!existing) {
-      byKind.set(version.versionKind, version);
-      continue;
-    }
-    const existingIsOfficial = ["ogl", "tj", "uj"].includes(existing.sourceExpressionId);
-    const candidateIsOfficial = ["ogl", "tj", "uj"].includes(version.sourceExpressionId);
-    const existingScore = (existing.hasStructure ? 2 : 0) + (existingIsOfficial ? 1 : 0);
-    const candidateScore = (version.hasStructure ? 2 : 0) + (candidateIsOfficial ? 1 : 0);
-    if (candidateScore > existingScore) {
-      byKind.set(version.versionKind, version);
-    }
+  const byKind = new Map<LegalActVersionKind, VersionSelectionInput[]>();
+  for (const version of versions) {
+    const list = byKind.get(version.versionKind) ?? [];
+    list.push(version);
+    byKind.set(version.versionKind, list);
   }
 
-  const representatives = [...byKind.values()];
+  const warnings: string[] = [];
+  const representatives: VersionSelectionInput[] = [];
+  for (const candidates of byKind.values()) {
+    const picked = pickRepresentative(candidates);
+    if (!picked) continue;
+    representatives.push(picked.representative);
+    if (picked.warning) warnings.push(picked.warning);
+  }
+
   const candidates: ExpressionCandidate[] = representatives.map((version) => ({
     sourceExpressionId: version.sourceExpressionId,
     versionKind: version.versionKind,
@@ -69,16 +121,17 @@ export function chooseDisplayVersion(versions: ReadonlyArray<VersionSelectionInp
   }));
 
   const selection = chooseExpressionSelection(candidates);
+  warnings.push(...selection.warnings);
 
-  const representativeByExpressionId = new Map(representatives.map((version) => [version.sourceExpressionId, version]));
+  // representatives has at most one entry per versionKind (see byKind above), and our
+  // vocabulary maps each versionKind to exactly one sourceExpressionId (ogl/tj/uj), so matching
+  // by sourceExpressionId here always recovers the single correct representative.
   const authoritativeRepresentative = selection.authoritativeVersion
-    ? representativeByExpressionId.get(selection.authoritativeVersion.sourceExpressionId)
+    ? representatives.find((v) => v.sourceExpressionId === selection.authoritativeVersion!.sourceExpressionId)
     : undefined;
   const retrievalRepresentative = selection.retrievalVersion
-    ? representativeByExpressionId.get(selection.retrievalVersion.sourceExpressionId)
+    ? representatives.find((v) => v.sourceExpressionId === selection.retrievalVersion!.sourceExpressionId)
     : undefined;
-
-  const warnings = [...selection.warnings];
 
   // Prefer, in order: the authoritative representative if it has structure, then the
   // retrieval representative if it has structure, then ANY version with structure

@@ -1,4 +1,4 @@
-import { EliClientError } from "../lib/legal/eli/client";
+import { EliClientError, fetchEliActReferences } from "../lib/legal/eli/client";
 import { CliValidationError, ingestEliActMetadata, parseIngestCliArgs } from "../lib/legal/eli/ingest";
 
 function printUsage() {
@@ -7,7 +7,7 @@ function printUsage() {
 
 async function main() {
   const args = parseIngestCliArgs(process.argv.slice(2));
-  const result = await ingestEliActMetadata(args);
+  const result = await ingestEliActMetadata(args, { fetchReferences: fetchEliActReferences });
 
   console.log("ELI ingest completed");
   console.log(result.sourceId);
@@ -28,6 +28,9 @@ async function main() {
 
   console.log(`retrieval_reason: ${result.sourceSelection.retrievalReason}`);
   console.log(`authority_reason: ${result.sourceSelection.authorityReason}`);
+  console.log(
+    `relations: inserted=${result.relations.inserted} updated=${result.relations.updated} deactivated=${result.relations.deactivated} resolved=${result.relations.resolved}`,
+  );
 
   if (result.sourceSelection.warnings.length > 0) {
     console.log("warnings:");

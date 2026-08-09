@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
 	type AnyPgColumn,
 	boolean,
@@ -56,6 +57,19 @@ export const legalActVersions = pgTable(
 		effectiveFrom: date("effective_from"),
 		effectiveTo: date("effective_to"),
 		sourceExpressionId: text("source_expression_id").notNull().default("unknown"),
+		/**
+		 * Immutable-instance identity for an announcement-backed consolidated (tj) version — the
+		 * `legal_acts` row of the OFFICIAL "Obwieszczenie ... w sprawie ogłoszenia jednolitego
+		 * tekstu ustawy" that this version's provisions were extracted from. NULL for every other
+		 * version (ogl, uj, and the legacy pre-announcement-model bare `tj` reachability row).
+		 * Deliberately real relational provenance rather than a denormalized ELI string: the
+		 * announcement's own `legal_acts.sourceId`/`eliUri` already carries that identity, and a
+		 * copy here would just be one more place for it to drift out of sync.
+		 */
+		sourceAnnouncementLegalActId: uuid("source_announcement_legal_act_id").references(
+			(): AnyPgColumn => legalActs.id,
+			{ onDelete: "restrict" },
+		),
 		canonicalEliUri: text("canonical_eli_uri"),
 		authorityClass: text("authority_class").notNull().default("unknown"),
 		nonAuthoritative: boolean("non_authoritative").notNull().default(false),
@@ -75,13 +89,75 @@ export const legalActVersions = pgTable(
 		index("legal_act_versions_legal_act_id_idx").on(table.legalActId),
 		index("legal_act_versions_version_kind_idx").on(table.versionKind),
 		index("legal_act_versions_is_current_idx").on(table.isCurrent),
-		uniqueIndex("legal_act_versions_source_expression_uidx").on(
-			table.legalActId,
-			table.sourceExpressionId,
+		index("legal_act_versions_source_announcement_legal_act_id_idx").on(
+			table.sourceAnnouncementLegalActId,
 		),
+		// Legacy/non-announcement expression slots (ogl, uj, and the pre-announcement-model bare
+		// `tj` reachability row) stay a singleton per (act, expression kind) — unchanged behavior.
+		// Announcement-backed consolidated versions are exempt from this constraint: many
+		// immutable `tj` versions (one per historical announcement) may coexist for one base act.
+		uniqueIndex("legal_act_versions_source_expression_uidx")
+			.on(table.legalActId, table.sourceExpressionId)
+			.where(sql`${table.sourceAnnouncementLegalActId} IS NULL`),
+		// Announcement-backed versions: at most one version per (base act, announcement) — makes
+		// re-ingesting the SAME announcement idempotent while still allowing one new immutable
+		// version per DISTINCT announcement.
+		uniqueIndex("legal_act_versions_source_announcement_uidx")
+			.on(table.legalActId, table.sourceAnnouncementLegalActId)
+			.where(sql`${table.sourceAnnouncementLegalActId} IS NOT NULL`),
 		uniqueIndex("legal_act_versions_source_document_uidx").on(
 			table.legalActId,
 			table.sourceDocumentKey,
+		),
+	],
+);
+
+/**
+ * Normalized ELI `/references` relation graph for a legal act — persisted so future current-law
+ * classification can run purely from DB state, never a live ELI call (see
+ * feature/current-law-corpus Phase 1). `relationType` is OUR stable internal vocabulary (derived
+ * from, but decoupled from, the Polish `sourceRelationType` label actually returned by ELI) so a
+ * label wording change upstream can't silently break classification logic. An unrecognized label
+ * is preserved as `relationType = "unrecognized"` (never dropped, never crashes ingestion) with
+ * `sourceRelationType` kept for audit — it is simply never consulted by classification.
+ * `relatedLegalActId` is nullable BY DESIGN: a relation is recorded as soon as it's discovered,
+ * even before the related act's own metadata has been fetched/ingested, so classification can
+ * fail closed on "related act not yet resolved" instead of silently fabricating one.
+ *
+ * `isActive`/`refreshedAt` give this an explicit current-vs-historical observation state (row
+ * identity itself is NEVER deleted, per (legalActId, relationType, relatedSourceId) — a relation
+ * that disappears from a later successful ELI response is marked inactive, not removed, so
+ * historical provenance survives while future classification can safely filter to `isActive`
+ * only. `refreshedAt` doubles as "last seen active": it only ever advances while a relation is
+ * (re)confirmed active — it is deliberately NOT touched at the moment a relation is deactivated,
+ * so it always answers "when was this last actually observed," not "when did we last run a sync."
+ */
+export const legalActRelations = pgTable(
+	"legal_act_relations",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		legalActId: uuid("legal_act_id")
+			.notNull()
+			.references(() => legalActs.id, { onDelete: "cascade" }),
+		relationType: text("relation_type").notNull(),
+		sourceRelationType: text("source_relation_type").notNull(),
+		relatedSourceId: text("related_source_id").notNull(),
+		relatedLegalActId: uuid("related_legal_act_id").references(() => legalActs.id, {
+			onDelete: "set null",
+		}),
+		isActive: boolean("is_active").notNull().default(true),
+		discoveredAt: timestamp("discovered_at", { withTimezone: true }).defaultNow().notNull(),
+		refreshedAt: timestamp("refreshed_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => [
+		index("legal_act_relations_legal_act_id_idx").on(table.legalActId),
+		index("legal_act_relations_related_legal_act_id_idx").on(table.relatedLegalActId),
+		index("legal_act_relations_relation_type_idx").on(table.relationType),
+		index("legal_act_relations_is_active_idx").on(table.isActive),
+		uniqueIndex("legal_act_relations_identity_uidx").on(
+			table.legalActId,
+			table.relationType,
+			table.relatedSourceId,
 		),
 	],
 );

@@ -29,8 +29,26 @@ interface LegalActDetailContentProps {
   initialProvision: LegalProvisionDetail | null;
 }
 
+/**
+ * Distinguishes multiple immutable, announcement-backed consolidated (tj) versions of the same
+ * act — each gets the announcement's own ELI source id and official legalStateDate in its label,
+ * so they never render as identical entries. The legacy, non-announcement-backed "tj" alias
+ * (no real consolidated content) is labeled explicitly as such, never as though it were a real
+ * snapshot.
+ */
 function versionLabel(version: LegalActVersionSummary): string {
-  return `${VERSION_KIND_LABELS[version.versionKind]} (${version.sourceExpressionId})`;
+  const base = `${VERSION_KIND_LABELS[version.versionKind]} (${version.sourceExpressionId})`;
+
+  if (version.announcement) {
+    const dateSuffix = version.legalStateDate ? `, stan na ${version.legalStateDate}` : "";
+    return `${base} — ${version.announcement.sourceId}${dateSuffix}`;
+  }
+
+  if (version.versionKind === "consolidated") {
+    return `${base} — nierozpoznane źródło (brak przypisanego obwieszczenia)`;
+  }
+
+  return base;
 }
 
 /** Updates the URL for deep-linking without forcing a server round trip — see milestone spec item 16 ("do not over-engineer routing"). */

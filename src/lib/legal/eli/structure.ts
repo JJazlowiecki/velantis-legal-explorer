@@ -27,6 +27,27 @@ const UNIT_TYPE_LABELS: Record<string, { provisionType: string; noun: string }> 
   lett: { provisionType: "letter", noun: "" },
 };
 
+/**
+ * Thrown by `mode: "consolidated_annex"` when the semantic "Załącznik - Tekst jednolity ..."
+ * heading rule doesn't resolve to exactly one section. Deliberately fail-closed: a consolidated
+ * announcement document's structure is not something this pipeline should ever guess about —
+ * zero matches means the document isn't the shape we expect, and multiple matches means picking
+ * one would be an unaudited judgment call baked into ingested "official" text.
+ */
+export class AnnexSelectionError extends Error {
+  constructor(
+    message: string,
+    public readonly matchCount: number,
+  ) {
+    super(message);
+    this.name = "AnnexSelectionError";
+  }
+}
+
+export type StructureParseMode = "direct" | "consolidated_annex";
+
+const CONSOLIDATED_ANNEX_HEADING_PATTERN = /^Załącznik\s*-\s*Tekst jednolity/;
+
 export interface ParsedProvision {
   id: string;
   parentId: string | null;
@@ -55,7 +76,10 @@ function extractLocalNumber(dataId: string): string {
   return underscoreIndex === -1 ? dataId : dataId.slice(underscoreIndex + 1);
 }
 
-export function parseActStructureHtml(html: string): ParsedProvision[] {
+export function parseActStructureHtml(
+  html: string,
+  mode: StructureParseMode = "direct",
+): ParsedProvision[] {
   const $ = cheerio.load(html);
   const results: ParsedProvision[] = [];
   let ordinal = 0;
@@ -173,7 +197,32 @@ export function parseActStructureHtml(html: string): ParsedProvision[] {
     }
   }
 
-  const rootSection = $(".parts > section").first();
+  let rootSection: ReturnType<typeof $>;
+
+  if (mode === "direct") {
+    rootSection = $(".parts > section").first();
+  } else {
+    const candidates = $(".parts > section").filter((_, el) => {
+      const headingText = normalizeText($(el).children(".part").first().children("h2").first().text());
+      return CONSOLIDATED_ANNEX_HEADING_PATTERN.test(headingText);
+    });
+
+    if (candidates.length === 0) {
+      throw new AnnexSelectionError(
+        'No section with a "Załącznik - Tekst jednolity ..." heading was found — refusing to guess which section is the consolidated-statute annex.',
+        0,
+      );
+    }
+    if (candidates.length > 1) {
+      throw new AnnexSelectionError(
+        `Found ${candidates.length} sections with a "Załącznik - Tekst jednolity ..." heading — refusing to guess which one is the consolidated-statute annex.`,
+        candidates.length,
+      );
+    }
+
+    rootSection = candidates.first();
+  }
+
   const rootPartDiv = rootSection.children(".part").first();
   if (rootPartDiv.length === 0) {
     return [];

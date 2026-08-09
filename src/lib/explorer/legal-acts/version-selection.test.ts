@@ -10,6 +10,8 @@ function version(overrides: Partial<VersionSelectionInput> & Pick<VersionSelecti
     currentnessStatus: "unproven",
     fetchedAt: new Date("2026-01-01T00:00:00Z"),
     hasStructure: false,
+    sourceAnnouncementLegalActId: null,
+    legalStateDate: null,
     ...overrides,
   };
 }
@@ -89,5 +91,101 @@ describe("chooseDisplayVersion", () => {
     const v = version({ id: "v1", sourceExpressionId: "tj", versionKind: "consolidated", hasStructure: true, currentnessStatus: "unproven" });
     const result = chooseDisplayVersion([v]);
     expect(result.warnings.some((w) => w.toLowerCase().includes("currentness is unproven"))).toBe(true);
+  });
+
+  describe("multiple immutable announcement-backed TJ versions (real current-law-corpus scenario)", () => {
+    it("real KC case: legacy tj alias plus two announcement-backed tj versions — never arbitrarily picks the legacy alias, deterministically prefers the structured, most-recent-legalStateDate real version", () => {
+      const ogl = version({ id: "ogl", sourceExpressionId: "ogl", versionKind: "promulgated", hasStructure: true });
+      const legacyAlias = version({
+        id: "legacy-tj",
+        sourceExpressionId: "tj",
+        versionKind: "consolidated",
+        hasStructure: false,
+        sourceAnnouncementLegalActId: null,
+        fetchedAt: new Date("2020-01-01T00:00:00Z"), // earliest — would win under the OLD fetchedAt-based tie-break
+      });
+      const olderReal = version({
+        id: "tj-2023-1610",
+        sourceExpressionId: "tj",
+        versionKind: "consolidated",
+        hasStructure: true,
+        sourceAnnouncementLegalActId: "announcement-2023-1610",
+        legalStateDate: "2023-07-28",
+      });
+      const newerReal = version({
+        id: "tj-2024-1061",
+        sourceExpressionId: "tj",
+        versionKind: "consolidated",
+        hasStructure: true,
+        sourceAnnouncementLegalActId: "announcement-2024-1061",
+        legalStateDate: "2024-06-19",
+      });
+
+      const result = chooseDisplayVersion([ogl, legacyAlias, olderReal, newerReal]);
+
+      expect(result.defaultVersionId).toBe("tj-2024-1061");
+      expect(result.authoritativeVersionId).toBe("tj-2024-1061");
+      expect(result.warnings.some((w) => w.includes("2 niezależne"))).toBe(true);
+      expect(result.defaultVersionId).not.toBe("legacy-tj");
+    });
+
+    it("falls back to the legacy alias ONLY when no real announcement-backed version exists at all", () => {
+      const legacyAlias = version({
+        id: "legacy-tj",
+        sourceExpressionId: "tj",
+        versionKind: "consolidated",
+        hasStructure: false,
+        sourceAnnouncementLegalActId: null,
+      });
+
+      const result = chooseDisplayVersion([legacyAlias]);
+
+      expect(result.authoritativeVersionId).toBe("legacy-tj");
+    });
+
+    it("among real versions with no structure at all, still picks the one with the most recent legalStateDate deterministically", () => {
+      const olderReal = version({
+        id: "tj-old",
+        sourceExpressionId: "tj",
+        versionKind: "consolidated",
+        hasStructure: false,
+        sourceAnnouncementLegalActId: "announcement-old",
+        legalStateDate: "2023-01-01",
+      });
+      const newerRealNoStructure = version({
+        id: "tj-new-no-structure",
+        sourceExpressionId: "tj",
+        versionKind: "consolidated",
+        hasStructure: false,
+        sourceAnnouncementLegalActId: "announcement-new",
+        legalStateDate: "2026-05-19",
+      });
+
+      const result = chooseDisplayVersion([olderReal, newerRealNoStructure]);
+
+      expect(result.authoritativeVersionId).toBe("tj-new-no-structure");
+    });
+
+    it("does not warn about multiple versions when only one real announcement-backed TJ exists alongside the legacy alias", () => {
+      const legacyAlias = version({
+        id: "legacy-tj",
+        sourceExpressionId: "tj",
+        versionKind: "consolidated",
+        sourceAnnouncementLegalActId: null,
+      });
+      const onlyReal = version({
+        id: "tj-real",
+        sourceExpressionId: "tj",
+        versionKind: "consolidated",
+        hasStructure: true,
+        sourceAnnouncementLegalActId: "announcement-1",
+        legalStateDate: "2024-06-19",
+      });
+
+      const result = chooseDisplayVersion([legacyAlias, onlyReal]);
+
+      expect(result.defaultVersionId).toBe("tj-real");
+      expect(result.warnings.some((w) => w.includes("niezależne"))).toBe(false);
+    });
   });
 });
