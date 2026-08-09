@@ -7,6 +7,7 @@ export const serverEnvSchema = z.object({
   POSTGRES_PASSWORD: z.string().min(1, "POSTGRES_PASSWORD is required"),
   OPENAI_API_KEY: z.string().min(1).optional(),
   OPENAI_EMBEDDING_MODEL: z.string().min(1).default("text-embedding-3-small"),
+  OPENAI_ISSUE_DETECTION_MODEL: z.string().min(1).default("gpt-4o-mini"),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
