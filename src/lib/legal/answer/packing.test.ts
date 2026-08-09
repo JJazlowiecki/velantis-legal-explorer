@@ -1,0 +1,120 @@
+import { describe, expect, it } from "vitest";
+
+import type { DeduplicatedRetrievedProvision, RetrievalProvenanceEntry } from "../issues/investigate";
+import { packSources } from "./packing";
+
+function provenance(overrides: Partial<RetrievalProvenanceEntry> = {}): RetrievalProvenanceEntry {
+  return {
+    issueLabel: "issue",
+    issueLikelihood: "possible",
+    retrievalQuery: "query",
+    lexicalRank: null,
+    vectorRank: 1,
+    vectorSimilarity: 0.5,
+    isExactCitationMatch: false,
+    finalScore: 0.01,
+    ...overrides,
+  };
+}
+
+function provision(overrides: Partial<DeduplicatedRetrievedProvision> = {}): DeduplicatedRetrievedProvision {
+  return {
+    legalProvisionId: "p1",
+    legalActVersionId: "v1",
+    legalActId: "a1",
+    actTitle: "Ustawa testowa",
+    citationLabel: "art. 1",
+    text: "Art. 1. Tekst.",
+    hierarchy: ["Dział I"],
+    versionKind: "promulgated",
+    authorityClass: "authoritative",
+    currentnessStatus: "unproven",
+    sourceExpressionId: "ogl",
+    foundBy: [provenance()],
+    ...overrides,
+  };
+}
+
+describe("packSources", () => {
+  it("assigns stable SOURCE_1, SOURCE_2, ... identifiers", () => {
+    const packed = packSources([
+      provision({ legalProvisionId: "p1", foundBy: [provenance({ finalScore: 0.02 })] }),
+      provision({ legalProvisionId: "p2", foundBy: [provenance({ finalScore: 0.01 })] }),
+    ]);
+
+    expect(packed.map((s) => s.sourceId)).toEqual(["SOURCE_1", "SOURCE_2"]);
+  });
+
+  it("deduplicates by legalProvisionId even if the same provision appears twice in the input", () => {
+    const packed = packSources([
+      provision({ legalProvisionId: "dup", foundBy: [provenance({ issueLabel: "issue A" })] }),
+      provision({ legalProvisionId: "dup", foundBy: [provenance({ issueLabel: "issue B" })] }),
+      provision({ legalProvisionId: "other" }),
+    ]);
+
+    expect(packed).toHaveLength(2);
+    expect(packed.filter((s) => s.legalProvisionId === "dup")).toHaveLength(1);
+  });
+
+  it("ranks exact citation matches ahead of fuzzy results regardless of score", () => {
+    const packed = packSources([
+      provision({ legalProvisionId: "fuzzy", foundBy: [provenance({ finalScore: 0.9, isExactCitationMatch: false })] }),
+      provision({ legalProvisionId: "exact", foundBy: [provenance({ finalScore: 0.01, isExactCitationMatch: true })] }),
+    ]);
+
+    expect(packed[0].legalProvisionId).toBe("exact");
+    expect(packed[0].sourceId).toBe("SOURCE_1");
+  });
+
+  it("ranks by best fused score when no exact match is present", () => {
+    const packed = packSources([
+      provision({ legalProvisionId: "weak", foundBy: [provenance({ finalScore: 0.01 })] }),
+      provision({ legalProvisionId: "strong", foundBy: [provenance({ finalScore: 0.05 })] }),
+    ]);
+
+    expect(packed[0].legalProvisionId).toBe("strong");
+  });
+
+  it("bounds the packed set to a simple explicit maximum", () => {
+    const provisions = Array.from({ length: 20 }, (_, i) =>
+      provision({ legalProvisionId: `p${i}`, citationLabel: `art. ${i}`, foundBy: [provenance({ finalScore: i })] }),
+    );
+
+    const packed = packSources(provisions, { maxSources: 5 });
+    expect(packed).toHaveLength(5);
+    // highest scores kept
+    expect(packed.map((s) => s.legalProvisionId)).toEqual(["p19", "p18", "p17", "p16", "p15"]);
+  });
+
+  it("preserves full source/version/authority metadata and hierarchy for each packed source", () => {
+    const packed = packSources([
+      provision({
+        legalProvisionId: "p1",
+        actTitle: "Kodeks postępowania administracyjnego",
+        citationLabel: "art. 16 § 1",
+        text: "§ 1. Właściwość rzeczową organu...",
+        hierarchy: ["Dział I - Przepisy ogólne", "Rozdział 3 - Właściwość organów"],
+        versionKind: "promulgated",
+        authorityClass: "authoritative",
+        currentnessStatus: "unproven",
+        sourceExpressionId: "ogl",
+      }),
+    ]);
+
+    expect(packed[0]).toMatchObject({
+      legalProvisionId: "p1",
+      actTitle: "Kodeks postępowania administracyjnego",
+      citationLabel: "art. 16 § 1",
+      text: "§ 1. Właściwość rzeczową organu...",
+      hierarchy: ["Dział I - Przepisy ogólne", "Rozdział 3 - Właściwość organów"],
+      versionKind: "promulgated",
+      authorityClass: "authoritative",
+      currentnessStatus: "unproven",
+      sourceExpressionId: "ogl",
+    });
+  });
+
+  it("returns an empty array for no provisions", () => {
+    expect(packSources([])).toEqual([]);
+  });
+});

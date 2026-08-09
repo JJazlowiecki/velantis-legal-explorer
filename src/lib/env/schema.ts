@@ -8,6 +8,8 @@ export const serverEnvSchema = z.object({
   OPENAI_API_KEY: z.string().min(1).optional(),
   OPENAI_EMBEDDING_MODEL: z.string().min(1).default("text-embedding-3-small"),
   OPENAI_ISSUE_DETECTION_MODEL: z.string().min(1).default("gpt-4o-mini"),
+  OPENAI_FINAL_ANSWER_MODEL: z.string().min(1).default("gpt-4o-mini"),
+  OPENAI_GROUNDING_VERIFICATION_MODEL: z.string().min(1).default("gpt-4o-mini"),
   // Calibrated against text-embedding-3-small on the DU/1960/168 corpus: unrelated/nonsense
   // Polish queries scored up to ~0.30 cosine similarity (OpenAI embeddings have a non-zero
   // baseline for unrelated short legal text), while genuinely relevant queries scored 0.42+
