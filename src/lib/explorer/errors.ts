@@ -5,7 +5,7 @@ import { IssueDetectionError } from "@/lib/legal/issues/detect";
 import { LegalIssueInvestigationError } from "@/lib/legal/issues/investigate";
 import { EmbeddingError } from "@/lib/legal/search/embeddings";
 import { HybridSearchError } from "@/lib/legal/search/service";
-import { ExplorerConfigError } from "./corpus-config";
+import { CurrentCorpusNotReadyError, ExplorerConfigError } from "./corpus-config";
 
 const GENERIC_ERROR_MESSAGE = "Wystąpił nieoczekiwany błąd. Spróbuj ponownie później.";
 
@@ -18,6 +18,10 @@ const GENERIC_ERROR_MESSAGE = "Wystąpił nieoczekiwany błąd. Spróbuj ponowni
 export function mapErrorToSafeMessage(error: unknown): string {
   if (error instanceof ExplorerConfigError) {
     return "Środowisko testowe nie jest poprawnie skonfigurowane (brak korpusu testowego). Skontaktuj się z administratorem środowiska.";
+  }
+
+  if (error instanceof CurrentCorpusNotReadyError) {
+    return "Brak gotowego korpusu aktualnego prawa.";
   }
 
   if (

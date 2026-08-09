@@ -44,3 +44,16 @@ export type ExplorerHistorySnapshot = z.infer<typeof explorerHistorySnapshotSche
 
 /** corpus_version_ids is stored as a plain JSON array of legalActVersion UUID strings. */
 export const explorerHistoryCorpusVersionIdsSchema = z.array(z.uuid());
+
+/**
+ * Current-law-corpus provenance columns (see current_law_corpus_runs, schema.ts) — all null
+ * for entries recorded in EXPLORER_CORPUS_MODE=test. Kept as a small sibling schema rather than
+ * folded into the snapshot itself since these are plain nullable columns, not JSONB.
+ */
+export const explorerHistoryCorpusProvenanceSchema = z.object({
+  corpusRunId: z.uuid().nullable(),
+  rulesetVersion: z.string().nullable(),
+  effectiveAsOf: z.string().nullable(),
+});
+
+export type ExplorerHistoryCorpusProvenance = z.infer<typeof explorerHistoryCorpusProvenanceSchema>;

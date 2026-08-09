@@ -268,6 +268,17 @@ export const explorerHistoryEntries = pgTable(
 		status: text("status").notNull(),
 		resultSnapshot: jsonb("result_snapshot").notNull(),
 		corpusVersionIds: jsonb("corpus_version_ids").notNull(),
+		/**
+		 * Current-law-corpus provenance (see current_law_corpus_runs below) — null for entries
+		 * recorded in the historical test corpus mode. Real FK with onDelete:"restrict": a corpus
+		 * run is an immutable audit record that must never be silently orphaned by deleting it out
+		 * from under a History entry that cites it.
+		 */
+		corpusRunId: uuid("corpus_run_id").references((): AnyPgColumn => currentLawCorpusRuns.id, {
+			onDelete: "restrict",
+		}),
+		rulesetVersion: text("ruleset_version"),
+		effectiveAsOf: date("effective_as_of"),
 		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 	},
@@ -327,5 +338,70 @@ export const explorerSavedItems = pgTable(
 			table.kind,
 			table.contentKey,
 		),
+	],
+);
+
+/**
+ * One immutable, auditable "was this base act's text safe to treat as current law as of
+ * effectiveAsOf, under rulesetVersion, and why" decision batch (see
+ * src/lib/legal/current-law/select.ts and service.ts, feature/current-corpus-runtime
+ * milestone). A run is never mutated or deleted after creation — regenerating always inserts
+ * a NEW row; old runs stay queryable forever for audit. `currentnessStatus`/`isCurrent` on
+ * legal_act_versions are deliberately NEVER written by this pipeline — currentness is
+ * entirely run/effectiveAsOf-relative and lives only here and in current_law_corpus_entries.
+ */
+export const currentLawCorpusRuns = pgTable(
+	"current_law_corpus_runs",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		effectiveAsOf: date("effective_as_of").notNull(),
+		generatedAt: timestamp("generated_at", { withTimezone: true }).defaultNow().notNull(),
+		rulesetVersion: text("ruleset_version").notNull(),
+		selectionHash: text("selection_hash").notNull(),
+		status: text("status").notNull(),
+		summary: jsonb("summary").notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => [
+		index("current_law_corpus_runs_ruleset_version_idx").on(table.rulesetVersion),
+		index("current_law_corpus_runs_effective_as_of_idx").on(table.effectiveAsOf),
+		index("current_law_corpus_runs_ruleset_status_generated_idx").on(
+			table.rulesetVersion,
+			table.status,
+			table.generatedAt,
+		),
+	],
+);
+
+/**
+ * One per-base-act decision within a current_law_corpus_runs run — records BOTH included and
+ * excluded acts, with an explicit machine-testable reasonCode (see reason-codes.ts) and a
+ * JSON evidence trail. `legalActVersionId` is null for excluded acts with no qualifying
+ * version. `runtimeReady` is orthogonal to `decision`: an act can be legally `included` by
+ * Model A yet not yet indexed/embedded — see indexing readiness logic in service.ts.
+ */
+export const currentLawCorpusEntries = pgTable(
+	"current_law_corpus_entries",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		runId: uuid("run_id")
+			.notNull()
+			.references(() => currentLawCorpusRuns.id, { onDelete: "cascade" }),
+		legalActId: uuid("legal_act_id")
+			.notNull()
+			.references(() => legalActs.id, { onDelete: "restrict" }),
+		legalActVersionId: uuid("legal_act_version_id").references(() => legalActVersions.id, {
+			onDelete: "restrict",
+		}),
+		decision: text("decision").notNull(),
+		reasonCode: text("reason_code").notNull(),
+		evidence: jsonb("evidence").notNull(),
+		runtimeReady: boolean("runtime_ready").notNull().default(false),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => [
+		index("current_law_corpus_entries_run_id_idx").on(table.runId),
+		index("current_law_corpus_entries_decision_idx").on(table.decision),
+		uniqueIndex("current_law_corpus_entries_run_act_uidx").on(table.runId, table.legalActId),
 	],
 );

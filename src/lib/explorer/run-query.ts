@@ -3,16 +3,30 @@ import { mapErrorToSafeMessage } from "./errors";
 import { validateExplorerQuery } from "./query-validation";
 import { toExplorerAnswerView, type ExplorerAnswerView, type ExplorerSearchResult } from "./view-model";
 
+/**
+ * The corpus resolved ONCE per query, before search/answer runs — the SAME descriptor is then
+ * used both for `legalActVersionIds` (search/answer scope) and for History provenance
+ * (`corpusRunId`/`rulesetVersion`/`effectiveAsOf`), so the two can never describe different
+ * corpus state. `corpusRunId`/`rulesetVersion`/`effectiveAsOf` are null in historical test mode.
+ */
+export interface ResolvedQueryCorpus {
+  legalActVersionIds: string[];
+  corpusRunId: string | null;
+  rulesetVersion: string | null;
+  effectiveAsOf: string | null;
+}
+
 export interface RecordHistoryEntryInput {
   query: string;
   result: LegalAnswerResult;
   view: ExplorerAnswerView;
+  corpus: ResolvedQueryCorpus;
 }
 
 export type RecordHistoryEntryFn = (input: RecordHistoryEntryInput) => Promise<{ id: string }>;
 
 export interface RunExplorerQueryDeps {
-  getLegalActVersionIds: () => string[];
+  getCorpus: () => Promise<ResolvedQueryCorpus>;
   answerLegalProblem: typeof answerLegalProblem;
   getDb: () => AnswerLegalProblemOptions["db"];
   /**
@@ -39,12 +53,13 @@ export async function runExplorerQuery(rawQuery: unknown, deps: RunExplorerQuery
   }
 
   let result: LegalAnswerResult;
+  let corpus: ResolvedQueryCorpus;
   try {
-    const legalActVersionIds = deps.getLegalActVersionIds();
+    corpus = await deps.getCorpus();
 
     result = await deps.answerLegalProblem({
       problemDescription: validation.query,
-      legalActVersionIds,
+      legalActVersionIds: corpus.legalActVersionIds,
       db: deps.getDb(),
     });
   } catch (error) {
@@ -66,7 +81,7 @@ export async function runExplorerQuery(rawQuery: unknown, deps: RunExplorerQuery
   let historyEntryId: string | undefined;
   if (deps.recordHistoryEntry) {
     try {
-      const entry = await deps.recordHistoryEntry({ query: validation.query, result, view });
+      const entry = await deps.recordHistoryEntry({ query: validation.query, result, view, corpus });
       historyEntryId = entry.id;
     } catch (error) {
       console.error(

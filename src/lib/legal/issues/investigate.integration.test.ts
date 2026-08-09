@@ -174,6 +174,49 @@ describeDatabase("investigateLegalProblem", () => {
     ).rejects.toThrow(LegalIssueInvestigationError);
   });
 
+  it("handles a legitimate zero-issue detection result deterministically: no search attempted, empty result, no exception", async () => {
+    const { currentVersion } = await seedFixture();
+    if (!db) throw new Error("unreachable");
+
+    let searchAttempted = false;
+    const trackingEmbed: EmbedTextsFn = async (texts) => {
+      searchAttempted = true;
+      return fakeEmbed(texts);
+    };
+
+    const result = await investigateLegalProblem({
+      problemDescription: "jaka jest dzisiaj pogoda?",
+      legalActVersionIds: [currentVersion.id],
+      db,
+      embedTexts: trackingEmbed,
+      detectIssues: detectionWith([]),
+    });
+
+    expect(searchAttempted).toBe(false);
+    expect(result.issues).toEqual([]);
+    expect(result.retrievedProvisions).toEqual([]);
+  });
+
+  it.each([
+    ["weather question", "jaka jest dzisiaj pogoda w Warszawie?"],
+    ["poem request", "napisz mi wiersz o wiośnie"],
+    ["arithmetic/non-legal prompt", "ile to jest 2 plus 2?"],
+  ])("%s: zero detected issues flows to a safe, empty investigation result", async (_label, problemDescription) => {
+    const { currentVersion } = await seedFixture();
+    if (!db) throw new Error("unreachable");
+
+    const result = await investigateLegalProblem({
+      problemDescription,
+      legalActVersionIds: [currentVersion.id],
+      db,
+      embedTexts: fakeEmbed,
+      detectIssues: detectionWith([]),
+    });
+
+    expect(result.issues).toEqual([]);
+    expect(result.retrievedProvisions).toEqual([]);
+  });
+
   it("never searches a historical version unless it is explicitly supplied", async () => {
     const { currentVersion, historicalVersion, alpha } = await seedFixture();
     if (!db) throw new Error("unreachable");

@@ -9,6 +9,7 @@ function record(overrides: Partial<HistoryEntryRecord> = {}): HistoryEntryRecord
     query: "opis problemu",
     status: "answered",
     corpusVersionIds: ["572d313e-ae03-4207-97c6-38e2e5088617"],
+    corpusProvenance: { corpusRunId: null, rulesetVersion: null, effectiveAsOf: null },
     createdAt: new Date("2026-01-15T10:00:00Z"),
     snapshot: {
       status: "answered",

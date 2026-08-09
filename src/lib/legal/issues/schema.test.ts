@@ -50,9 +50,12 @@ describe("legalIssueDetectionResultSchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("rejects an empty issue list", () => {
+  it("accepts an empty issue list as a legitimate zero-legal-issue result", () => {
     const result = legalIssueDetectionResultSchema.safeParse({ summary: "Summary", issues: [] });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.issues).toEqual([]);
+    }
   });
 
   it("rejects a numeric confidence value in place of a qualitative likelihood", () => {

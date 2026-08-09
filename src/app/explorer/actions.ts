@@ -3,13 +3,17 @@
 import { getDb } from "@/db";
 import { getServerEnv } from "@/lib/env/server";
 import { answerLegalProblem } from "@/lib/legal/answer/answer";
-import { parseExplorerTestCorpusVersionIds } from "@/lib/explorer/corpus-config";
+import {
+  CurrentCorpusNotReadyError,
+  parseExplorerTestCorpusVersionIds,
+  resolveCurrentCorpus,
+} from "@/lib/explorer/corpus-config";
 import { createHistoryEntry, safeCleanupHistoryForVisitor } from "@/lib/explorer/history/service";
 import { getOrCreateVisitorId } from "@/lib/explorer/history/visitor";
 import { runExplorerQuery, type RecordHistoryEntryInput, type RunExplorerQueryDeps } from "@/lib/explorer/run-query";
 import type { ExplorerSearchResult } from "@/lib/explorer/view-model";
 
-async function recordHistoryEntry({ query, result, view }: RecordHistoryEntryInput): Promise<{ id: string }> {
+async function recordHistoryEntry({ query, result, view, corpus }: RecordHistoryEntryInput): Promise<{ id: string }> {
   const visitorId = await getOrCreateVisitorId();
   const entry = await createHistoryEntry({
     db: getDb(),
@@ -18,6 +22,11 @@ async function recordHistoryEntry({ query, result, view }: RecordHistoryEntryInp
     status: result.status,
     snapshot: view,
     corpusVersionIds: result.legalActVersionIds,
+    corpusProvenance: {
+      corpusRunId: corpus.corpusRunId,
+      rulesetVersion: corpus.rulesetVersion,
+      effectiveAsOf: corpus.effectiveAsOf,
+    },
   });
 
   // Opportunistic cleanup, run right after a successful write. safeCleanupHistoryForVisitor
@@ -45,7 +54,27 @@ export async function submitExplorerQuery(query: string): Promise<ExplorerSearch
   const env = getServerEnv();
 
   const deps: RunExplorerQueryDeps = {
-    getLegalActVersionIds: () => parseExplorerTestCorpusVersionIds(env.EXPLORER_TEST_LEGAL_ACT_VERSION_IDS),
+    getCorpus: async () => {
+      if (env.EXPLORER_CORPUS_MODE === "test") {
+        return {
+          legalActVersionIds: parseExplorerTestCorpusVersionIds(env.EXPLORER_TEST_LEGAL_ACT_VERSION_IDS),
+          corpusRunId: null,
+          rulesetVersion: null,
+          effectiveAsOf: null,
+        };
+      }
+
+      // "current" mode REQUIRES an explicitly pinned run id — no id configured is itself a
+      // fail-closed "not ready" state, never an implicit "use whatever's latest" fallback.
+      if (!env.EXPLORER_CURRENT_CORPUS_RUN_ID) {
+        throw new CurrentCorpusNotReadyError();
+      }
+      const resolved = await resolveCurrentCorpus({ db: getDb(), runId: env.EXPLORER_CURRENT_CORPUS_RUN_ID });
+      if (!resolved) {
+        throw new CurrentCorpusNotReadyError();
+      }
+      return resolved;
+    },
     answerLegalProblem,
     getDb,
     recordHistoryEntry: env.EXPLORER_HISTORY_ENABLED ? recordHistoryEntry : undefined,
