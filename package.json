@@ -17,6 +17,9 @@
     "search:legal": "tsx src/scripts/search-legal.ts",
     "diagnose:legal-issues": "tsx src/scripts/diagnose-legal-issues.ts",
     "answer:legal": "tsx src/scripts/answer-legal.ts",
+    "corpus:prepare": "tsx src/scripts/prepare-current-law-corpus.ts",
+    "corpus:generate": "tsx src/scripts/generate-current-law-corpus.ts",
+    "corpus:eval": "tsx src/scripts/run-current-law-eval.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio"

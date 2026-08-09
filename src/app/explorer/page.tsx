@@ -2,7 +2,25 @@ import { AppShell } from "@/components/layout/app-shell";
 import { ExampleQuery } from "@/components/example-query";
 import { ExplorerSearchPanel } from "@/components/explorer/explorer-search-panel";
 import { TestCorpusNotice } from "@/components/explorer/test-corpus-notice";
+import { CurrentCorpusNotice, CurrentCorpusNotReadyNotice } from "@/components/explorer/current-corpus-notice";
+import { getDb } from "@/db";
+import { getServerEnv } from "@/lib/env/server";
+import { resolveCurrentCorpus } from "@/lib/explorer/corpus-config";
 import { resolveInitialQuery } from "@/lib/explorer/continue-search";
+
+async function CorpusNotice() {
+  const env = getServerEnv();
+
+  if (env.EXPLORER_CORPUS_MODE === "test") {
+    return <TestCorpusNotice />;
+  }
+
+  const resolved = env.EXPLORER_CURRENT_CORPUS_RUN_ID
+    ? await resolveCurrentCorpus({ db: getDb(), runId: env.EXPLORER_CURRENT_CORPUS_RUN_ID })
+    : null;
+
+  return resolved ? <CurrentCorpusNotice effectiveAsOf={resolved.effectiveAsOf ?? ""} /> : <CurrentCorpusNotReadyNotice />;
+}
 
 const exampleQuestions = [
   "Kiedy przedawnia się roszczenie?",
@@ -36,7 +54,7 @@ export default async function ExplorerPage({ searchParams }: ExplorerPageProps) 
         </h1>
 
         <div className="mt-6 w-full max-w-3xl">
-          <TestCorpusNotice />
+          <CorpusNotice />
         </div>
 
         <div className="mt-6 w-full max-w-3xl">

@@ -119,12 +119,15 @@ describe("detectLegalIssues", () => {
     ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
   });
 
-  it("rejects a well-formed JSON payload with an empty issues array", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(withContent({ summary: "Summary", issues: [] }));
+  it("accepts a well-formed JSON payload with an empty issues array (legitimate zero-legal-issue result)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      withContent({ summary: "Pytanie nie dotyczy żadnego zagadnienia prawnego.", issues: [] }),
+    );
 
-    await expect(
-      detectLegalIssues("opis problemu", { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
-    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    const result = await detectLegalIssues("jaka jest dzisiaj pogoda?", { apiKey: "test-key", fetchImpl, maxRetries: 0 });
+
+    expect(result.issues).toEqual([]);
+    expect(result.summary).toBe("Pytanie nie dotyczy żadnego zagadnienia prawnego.");
   });
 
   it("rejects a payload with a fabricated numeric confidence instead of a qualitative likelihood", async () => {

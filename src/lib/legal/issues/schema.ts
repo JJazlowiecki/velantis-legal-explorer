@@ -23,7 +23,11 @@ export type LegalIssueHypothesis = z.infer<typeof legalIssueHypothesisSchema>;
 
 export const legalIssueDetectionResultSchema = z.object({
   summary: z.string().min(1),
-  issues: z.array(legalIssueHypothesisSchema).min(1),
+  // Empty is a LEGITIMATE result: a clearly non-legal prompt (weather, a poem request,
+  // arithmetic, ...) has zero plausible legal issues, and the model correctly says so rather
+  // than fabricating one to satisfy a shape requirement. Each individual issue, when present,
+  // is still fully validated (see legalIssueHypothesisSchema) — this only relaxes the count.
+  issues: z.array(legalIssueHypothesisSchema),
   clarificationQuestion: z.string().min(1).optional(),
 });
 

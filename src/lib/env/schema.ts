@@ -33,6 +33,17 @@ export const serverEnvSchema = z.object({
   // test corpus (see src/lib/explorer/corpus-config.ts). Never a global/default corpus —
   // missing or empty configuration is a hard error at the point of use, not silently ignored.
   EXPLORER_TEST_LEGAL_ACT_VERSION_IDS: z.string().optional(),
+  // Explorer runtime mode (see src/lib/explorer/corpus-config.ts). "test" (default) uses the
+  // historical env-var test corpus above, unchanged. "current" uses a persisted, operator-
+  // pinned current-law-corpus run (see EXPLORER_CURRENT_CORPUS_RUN_ID below) — it NEVER falls
+  // back to "test" or to "whatever the latest run happens to be".
+  EXPLORER_CORPUS_MODE: z.enum(["test", "current"]).default("test"),
+  // The specific current_law_corpus_runs.id Explorer must use in "current" mode. Deliberately
+  // NOT auto-resolved to "the latest usable run" — a newer completed run can legitimately exist
+  // precisely because new legal metadata made an older run's decisions unsafe, so the runtime
+  // must never silently substitute one. Missing this in "current" mode is a valid, safely
+  // handled "not ready" state, not a startup crash — see CurrentCorpusNotReadyError.
+  EXPLORER_CURRENT_CORPUS_RUN_ID: z.uuid().optional(),
   // Explicit, validated on/off switch for persisting /explorer search history (see
   // src/lib/explorer/history/). Search queries can contain sensitive legal/personal
   // information, so this is opt-in via config rather than silently always-on — but defaults

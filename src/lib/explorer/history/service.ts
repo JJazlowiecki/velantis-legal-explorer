@@ -4,9 +4,11 @@ import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import * as schema from "../../../db/schema";
 import { explorerHistoryEntries } from "../../../db/schema";
 import {
+  explorerHistoryCorpusProvenanceSchema,
   explorerHistoryCorpusVersionIdsSchema,
   explorerHistorySnapshotSchema,
   explorerHistoryStatusSchema,
+  type ExplorerHistoryCorpusProvenance,
   type ExplorerHistorySnapshot,
   type ExplorerHistoryStatus,
 } from "./snapshot";
@@ -24,6 +26,7 @@ export interface HistoryEntryRecord {
   status: ExplorerHistoryStatus;
   snapshot: ExplorerHistorySnapshot;
   corpusVersionIds: string[];
+  corpusProvenance: ExplorerHistoryCorpusProvenance;
   createdAt: Date;
 }
 
@@ -39,8 +42,13 @@ function parseRow(row: typeof explorerHistoryEntries.$inferSelect): HistoryEntry
   const status = explorerHistoryStatusSchema.safeParse(row.status);
   const snapshot = explorerHistorySnapshotSchema.safeParse(row.resultSnapshot);
   const corpusVersionIds = explorerHistoryCorpusVersionIdsSchema.safeParse(row.corpusVersionIds);
+  const corpusProvenance = explorerHistoryCorpusProvenanceSchema.safeParse({
+    corpusRunId: row.corpusRunId,
+    rulesetVersion: row.rulesetVersion,
+    effectiveAsOf: row.effectiveAsOf,
+  });
 
-  if (!status.success || !snapshot.success || !corpusVersionIds.success) {
+  if (!status.success || !snapshot.success || !corpusVersionIds.success || !corpusProvenance.success) {
     console.error(`[explorer-history] malformed persisted entry ${row.id}: failed snapshot validation on read`);
     return null;
   }
@@ -51,6 +59,7 @@ function parseRow(row: typeof explorerHistoryEntries.$inferSelect): HistoryEntry
     status: status.data,
     snapshot: snapshot.data,
     corpusVersionIds: corpusVersionIds.data,
+    corpusProvenance: corpusProvenance.data,
     createdAt: row.createdAt,
   };
 }
@@ -62,13 +71,22 @@ export interface CreateHistoryEntryInput {
   status: ExplorerHistoryStatus;
   snapshot: ExplorerHistorySnapshot;
   corpusVersionIds: string[];
+  /** Defaults to all-null (historical test mode) when omitted. */
+  corpusProvenance?: ExplorerHistoryCorpusProvenance;
 }
 
-/** Validates the snapshot/status/corpusVersionIds BEFORE writing — never persist data that wouldn't survive being read back. */
+const NULL_CORPUS_PROVENANCE: ExplorerHistoryCorpusProvenance = {
+  corpusRunId: null,
+  rulesetVersion: null,
+  effectiveAsOf: null,
+};
+
+/** Validates the snapshot/status/corpusVersionIds/corpusProvenance BEFORE writing — never persist data that wouldn't survive being read back. */
 export async function createHistoryEntry(input: CreateHistoryEntryInput): Promise<{ id: string }> {
   const status = explorerHistoryStatusSchema.parse(input.status);
   const snapshot = explorerHistorySnapshotSchema.parse(input.snapshot);
   const corpusVersionIds = explorerHistoryCorpusVersionIdsSchema.parse(input.corpusVersionIds);
+  const corpusProvenance = explorerHistoryCorpusProvenanceSchema.parse(input.corpusProvenance ?? NULL_CORPUS_PROVENANCE);
 
   if (!input.visitorId) {
     throw new HistoryServiceError("createHistoryEntry requires a visitorId");
@@ -82,6 +100,9 @@ export async function createHistoryEntry(input: CreateHistoryEntryInput): Promis
       status,
       resultSnapshot: snapshot,
       corpusVersionIds,
+      corpusRunId: corpusProvenance.corpusRunId,
+      rulesetVersion: corpusProvenance.rulesetVersion,
+      effectiveAsOf: corpusProvenance.effectiveAsOf,
     })
     .returning({ id: explorerHistoryEntries.id });
 

@@ -264,6 +264,28 @@ describeDatabase("answerLegalProblem", () => {
     expect(result.alternativePaths[0].support).toEqual([]);
   });
 
+  it("a legitimate zero-issue detection result (non-legal prompt) flows to a safe insufficient-evidence answer without calling the final-answer model", async () => {
+    const { unindexedVersion } = await seedFixture();
+    if (!db) throw new Error("unreachable");
+
+    const generateFinalAnswer = vi.fn();
+
+    const result = await answerLegalProblem({
+      problemDescription: "jaka jest dzisiaj pogoda w Warszawie?",
+      legalActVersionIds: [unindexedVersion.id],
+      db,
+      embedTexts: fakeEmbed,
+      detectIssues: detectionWith([]),
+      generateFinalAnswer,
+    });
+
+    expect(generateFinalAnswer).not.toHaveBeenCalled();
+    expect(result.status).toBe("insufficient_evidence");
+    expect(result.conclusions).toEqual([]);
+    expect(result.sources).toEqual([]);
+    expect(result.alternativePaths).toEqual([]);
+  });
+
   it("returns a grounded conclusion with a valid, fully resolved source reference", async () => {
     const { currentVersion, alpha } = await seedFixture();
     if (!db) throw new Error("unreachable");

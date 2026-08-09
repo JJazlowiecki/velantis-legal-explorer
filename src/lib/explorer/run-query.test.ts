@@ -2,10 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { LegalAnswerResult } from "@/lib/legal/answer/answer";
 import { LegalIssueInvestigationError } from "@/lib/legal/issues/investigate";
-import { ExplorerConfigError } from "./corpus-config";
-import { runExplorerQuery, type RunExplorerQueryDeps } from "./run-query";
+import { CurrentCorpusNotReadyError, ExplorerConfigError } from "./corpus-config";
+import { runExplorerQuery, type ResolvedQueryCorpus, type RunExplorerQueryDeps } from "./run-query";
 
 const VALID_UUID = "572d313e-ae03-4207-97c6-38e2e5088617";
+const TEST_CORPUS: ResolvedQueryCorpus = {
+  legalActVersionIds: [VALID_UUID],
+  corpusRunId: null,
+  rulesetVersion: null,
+  effectiveAsOf: null,
+};
 
 function baseResult(overrides: Partial<LegalAnswerResult> = {}): LegalAnswerResult {
   return {
@@ -24,7 +30,7 @@ function baseResult(overrides: Partial<LegalAnswerResult> = {}): LegalAnswerResu
 
 function fakeDeps(overrides: Partial<RunExplorerQueryDeps> = {}): RunExplorerQueryDeps {
   return {
-    getLegalActVersionIds: () => [VALID_UUID],
+    getCorpus: async () => TEST_CORPUS,
     answerLegalProblem: vi.fn().mockResolvedValue(baseResult()),
     getDb: () => undefined,
     ...overrides,
@@ -90,7 +96,7 @@ describe("runExplorerQuery", () => {
 
   it("passes the trimmed query and configured legalActVersionIds through to answerLegalProblem", async () => {
     const answerLegalProblem = vi.fn().mockResolvedValue(baseResult());
-    const deps = fakeDeps({ answerLegalProblem, getLegalActVersionIds: () => [VALID_UUID] });
+    const deps = fakeDeps({ answerLegalProblem, getCorpus: async () => TEST_CORPUS });
 
     await runExplorerQuery("  jakiś problem prawny  ", deps);
 
@@ -101,7 +107,7 @@ describe("runExplorerQuery", () => {
 
   it("maps a missing test-corpus configuration error to a safe result without leaking the raw message", async () => {
     const deps = fakeDeps({
-      getLegalActVersionIds: () => {
+      getCorpus: async () => {
         throw new ExplorerConfigError("EXPLORER_TEST_LEGAL_ACT_VERSION_IDS is not configured");
       },
     });
@@ -112,6 +118,40 @@ describe("runExplorerQuery", () => {
     if (!result.ok) {
       expect(result.error).not.toContain("EXPLORER_TEST_LEGAL_ACT_VERSION_IDS");
     }
+  });
+
+  it("maps a not-ready current-corpus error to a safe result and never falls back to a test corpus", async () => {
+    const answerLegalProblem = vi.fn().mockResolvedValue(baseResult());
+    const deps = fakeDeps({
+      answerLegalProblem,
+      getCorpus: async () => {
+        throw new CurrentCorpusNotReadyError();
+      },
+    });
+
+    const result = await runExplorerQuery("jakiś problem prawny", deps);
+
+    expect(result).toEqual({ ok: false, error: "Brak gotowego korpusu aktualnego prawa." });
+    expect(answerLegalProblem).not.toHaveBeenCalled();
+  });
+
+  it("resolves the corpus exactly once and uses the SAME descriptor for both the answer call and history provenance", async () => {
+    const currentCorpus: ResolvedQueryCorpus = {
+      legalActVersionIds: [VALID_UUID],
+      corpusRunId: "run-1",
+      rulesetVersion: "pl-current-law-v1",
+      effectiveAsOf: "2026-08-09",
+    };
+    const getCorpus = vi.fn().mockResolvedValue(currentCorpus);
+    const answerLegalProblem = vi.fn().mockResolvedValue(baseResult());
+    const recordHistoryEntry = vi.fn().mockResolvedValue({ id: "history-1" });
+    const deps = fakeDeps({ getCorpus, answerLegalProblem, recordHistoryEntry });
+
+    await runExplorerQuery("jakiś problem prawny", deps);
+
+    expect(getCorpus).toHaveBeenCalledTimes(1);
+    expect(answerLegalProblem).toHaveBeenCalledWith(expect.objectContaining({ legalActVersionIds: currentCorpus.legalActVersionIds }));
+    expect(recordHistoryEntry).toHaveBeenCalledWith(expect.objectContaining({ corpus: currentCorpus }));
   });
 
   it("maps a pipeline error (e.g. investigation failure) to a safe result without leaking internals", async () => {

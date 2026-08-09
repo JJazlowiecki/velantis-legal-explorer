@@ -1,7 +1,26 @@
+import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
+
+import type * as schema from "../../db/schema";
+import { getCurrentLawCorpusRun } from "../legal/current-law/service";
+
 export class ExplorerConfigError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ExplorerConfigError";
+  }
+}
+
+/**
+ * Uniform "no usable current-law corpus" signal for EXPLORER_CORPUS_MODE=current — covers "no
+ * run id configured", "run id doesn't exist", "run not completed", and "zero runtime-ready
+ * entries" alike. The operator distinguishes these cases via logs/CLI (see
+ * src/scripts/generate-current-law-corpus.ts); the end user always sees the same safe message
+ * (see src/lib/explorer/errors.ts) — this is never surfaced as a raw error.
+ */
+export class CurrentCorpusNotReadyError extends Error {
+  constructor(message = "No usable current-law-corpus run is configured/ready") {
+    super(message);
+    this.name = "CurrentCorpusNotReadyError";
   }
 }
 
@@ -34,4 +53,50 @@ export function parseExplorerTestCorpusVersionIds(raw: string | undefined): stri
   }
 
   return ids;
+}
+
+/**
+ * A single resolved corpus descriptor used identically for search/answer scope AND History
+ * provenance, so the two can never describe different corpus state (see run-query.ts). In test
+ * mode the provenance fields are null; corpusVersionIds/legalActVersionIds still carries real
+ * ids either way.
+ */
+export interface ResolvedExplorerCorpus {
+  legalActVersionIds: string[];
+  corpusRunId: string | null;
+  rulesetVersion: string | null;
+  effectiveAsOf: string | null;
+}
+
+/**
+ * Resolves EXPLORER_CORPUS_MODE=current to a single pinned run's included+runtimeReady version
+ * ids. `runId` is REQUIRED (not optional) — the caller must have already confirmed one is
+ * configured; there is no "pick the latest usable run" fallback here (see
+ * getLatestUsableCurrentLawCorpus's doc comment in service.ts for why). Returns null — never
+ * throws — for every "not ready" case: the run doesn't exist, isn't `status: "completed"`, or
+ * has zero included+runtimeReady entries. Callers turn that null into CurrentCorpusNotReadyError.
+ */
+export async function resolveCurrentCorpus(input: {
+  db: PostgresJsDatabase<typeof schema>;
+  runId: string;
+}): Promise<ResolvedExplorerCorpus | null> {
+  const run = await getCurrentLawCorpusRun({ db: input.db, runId: input.runId });
+  if (!run || run.status !== "completed") {
+    return null;
+  }
+
+  const legalActVersionIds = run.entries
+    .filter((entry) => entry.decision === "included" && entry.runtimeReady && entry.legalActVersionId)
+    .map((entry) => entry.legalActVersionId as string);
+
+  if (legalActVersionIds.length === 0) {
+    return null;
+  }
+
+  return {
+    legalActVersionIds,
+    corpusRunId: run.runId,
+    rulesetVersion: run.rulesetVersion,
+    effectiveAsOf: run.effectiveAsOf,
+  };
 }

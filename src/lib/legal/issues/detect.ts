@@ -21,8 +21,9 @@ const chatCompletionEnvelopeSchema = z.object({
  * request-scoped identifiers to constrain (unlike generate/verify/skeptic, which must
  * restrict SOURCE_X/conclusionIndex to values that actually exist for that request), so it
  * is a single static schema rather than a per-request builder. Zod (legalIssueDetectionResultSchema)
- * still runs afterward as defense in depth, in particular for the >=1 issue / >=1
- * retrievalQuery constraints that strict Structured Outputs cannot express (no minItems).
+ * still runs afterward as defense in depth, in particular for the >=1-retrievalQuery-per-issue
+ * constraint that strict Structured Outputs cannot express (no minItems). `issues` itself is
+ * intentionally unconstrained on count — zero issues is a legitimate result for a non-legal prompt.
  */
 const ISSUE_DETECTION_JSON_SCHEMA = {
   type: "object",
@@ -78,7 +79,8 @@ const SYSTEM_PROMPT = `Jesteś asystentem prawnym pomagającym zidentyfikować m
 Twoim zadaniem NIE jest udzielenie porady prawnej ani ostatecznej odpowiedzi. Generujesz WYŁĄCZNIE hipotezy do dalszego wyszukiwania przepisów — nie są to ustalone wnioski prawne.
 
 Zasady:
-- Zwróć od 1 do 4 prawdopodobnych zagadnień prawnych (issues) mogących dotyczyć opisanej sytuacji.
+- Zwróć od 0 do 4 prawdopodobnych zagadnień prawnych (issues) mogących dotyczyć opisanej sytuacji.
+- Jeśli opis NIE dotyczy żadnego zagadnienia prawnego (np. pytanie o pogodę, prośba o wiersz, obliczenie matematyczne, pytanie techniczne niezwiązane z prawem, polecenie niezwiązane z prawem) — zwróć PUSTĄ tablicę issues i krótko wyjaśnij to w polu summary. NIGDY nie wymyślaj sztucznego zagadnienia prawnego tylko po to, by tablica issues nie była pusta.
 - Nie narzucaj jednej interpretacji, jeśli możliwych jest kilka — zachowaj wiele wiarygodnych ścieżek.
 - Każde zagadnienie ma jakościowy poziom prawdopodobieństwa: "most_likely", "possible" lub "needs_more_information". Nigdy nie podawaj liczbowego procentu pewności.
 - Dla każdego zagadnienia podaj krótkie uzasadnienie (rationale) i od 1 do 3 zwięzłych zapytań wyszukiwania (retrievalQueries) w języku polskim, przydatnych do wyszukania odpowiednich przepisów.
