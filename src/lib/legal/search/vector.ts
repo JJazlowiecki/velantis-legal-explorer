@@ -9,6 +9,8 @@ const DEFAULT_LIMIT = 30;
 export interface VectorCandidate {
   legalProvisionId: string;
   rank: number;
+  /** Cosine similarity in [-1, 1], i.e. `1 - cosineDistance`. Higher is more similar. */
+  similarity: number;
 }
 
 export interface VectorSearchOptions {
@@ -25,10 +27,10 @@ export async function vectorSearch(options: VectorSearchOptions): Promise<Vector
     return [];
   }
 
-  const distance = cosineDistance(legalSearchDocuments.embedding, queryEmbedding);
+  const cosineDistanceExpr = cosineDistance(legalSearchDocuments.embedding, queryEmbedding);
 
   const rows = await db
-    .select({ legalProvisionId: legalSearchDocuments.legalProvisionId })
+    .select({ legalProvisionId: legalSearchDocuments.legalProvisionId, cosineDistance: cosineDistanceExpr })
     .from(legalSearchDocuments)
     .where(
       and(
@@ -36,8 +38,12 @@ export async function vectorSearch(options: VectorSearchOptions): Promise<Vector
         isNotNull(legalSearchDocuments.embedding),
       ),
     )
-    .orderBy(asc(distance))
+    .orderBy(asc(cosineDistanceExpr))
     .limit(limit);
 
-  return rows.map((row, index) => ({ legalProvisionId: row.legalProvisionId, rank: index + 1 }));
+  return rows.map((row, index) => ({
+    legalProvisionId: row.legalProvisionId,
+    rank: index + 1,
+    similarity: 1 - Number(row.cosineDistance),
+  }));
 }

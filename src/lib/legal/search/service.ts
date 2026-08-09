@@ -24,6 +24,12 @@ export interface HybridLegalSearchOptions {
   candidateLimit?: number;
   db?: PostgresJsDatabase<typeof schema>;
   embedTexts?: EmbedTextsFn;
+  /**
+   * Minimum cosine similarity required for a vector-only candidate (found by no
+   * other signal) to be kept — see rank.ts. Defaults to
+   * LEGAL_SEARCH_MIN_VECTOR_SIMILARITY, or 0.15 if unset/invalid.
+   */
+  minVectorSimilarity?: number;
 }
 
 export interface HybridLegalSearchResult {
@@ -40,6 +46,18 @@ export interface HybridLegalSearchResult {
 
 const DEFAULT_LIMIT = 10;
 const DEFAULT_CANDIDATE_LIMIT = 30;
+// Keep in sync with src/lib/env/schema.ts LEGAL_SEARCH_MIN_VECTOR_SIMILARITY default;
+// see that file for the calibration rationale.
+const DEFAULT_MIN_VECTOR_SIMILARITY = 0.35;
+
+function resolveMinVectorSimilarity(): number {
+  const raw = process.env.LEGAL_SEARCH_MIN_VECTOR_SIMILARITY;
+  if (raw === undefined || raw === "") {
+    return DEFAULT_MIN_VECTOR_SIMILARITY;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : DEFAULT_MIN_VECTOR_SIMILARITY;
+}
 
 export async function hybridLegalSearch(
   options: HybridLegalSearchOptions,
@@ -60,6 +78,7 @@ export async function hybridLegalSearch(
   const legalActVersionIds = [...new Set(options.legalActVersionIds)];
   const limit = options.limit ?? DEFAULT_LIMIT;
   const candidateLimit = options.candidateLimit ?? DEFAULT_CANDIDATE_LIMIT;
+  const minVectorSimilarity = options.minVectorSimilarity ?? resolveMinVectorSimilarity();
   const embed = options.embedTexts ?? embedTexts;
 
   const db = options.db ?? (await import("../../../db/script-db")).getScriptDb();
@@ -98,11 +117,9 @@ export async function hybridLegalSearch(
     : [];
   const vectorMs = Date.now() - vectorStartedAt;
 
-  const fused = fuseSearchCandidates(
-    lexicalCandidates,
-    vectorCandidates,
-    new Set(exactCitationMatches),
-  ).slice(0, limit);
+  const fused = fuseSearchCandidates(lexicalCandidates, vectorCandidates, new Set(exactCitationMatches), {
+    minVectorSimilarity,
+  }).slice(0, limit);
 
   const hydrated = await hydrateProvisions(
     db,
@@ -126,6 +143,7 @@ export async function hybridLegalSearch(
         hierarchy: provision.hierarchy,
         lexicalRank: item.lexicalRank,
         vectorRank: item.vectorRank,
+        vectorSimilarity: item.vectorSimilarity,
         isExactCitationMatch: item.isExactCitationMatch,
         finalScore: item.score,
         versionKind: provision.versionKind,

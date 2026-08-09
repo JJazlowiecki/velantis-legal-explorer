@@ -98,7 +98,7 @@ async function main() {
         `   version_kind: ${item.versionKind} authority_class: ${item.authorityClass} currentness_status: ${item.currentnessStatus} source_expression_id: ${item.sourceExpressionId}`,
       );
       console.log(
-        `   lexical rank: ${item.lexicalRank ?? "-"} | vector rank: ${item.vectorRank ?? "-"} | hybrid score: ${item.finalScore.toFixed(4)}`,
+        `   lexical rank: ${item.lexicalRank ?? "-"} | vector rank: ${item.vectorRank ?? "-"} | vector similarity: ${item.vectorSimilarity !== null ? item.vectorSimilarity.toFixed(4) : "-"} | hybrid score: ${item.finalScore.toFixed(4)}`,
       );
       console.log("");
     });

@@ -345,4 +345,38 @@ describeDatabase("investigateLegalProblem", () => {
       ].sort(),
     );
   });
+
+  it("may honestly find zero supporting provisions against an INDEXED corpus when all semantic matches are too weak", async () => {
+    // Unlike the "unindexed version" case above, this corpus has real indexed content —
+    // the quality guard, not an empty index, is what produces the true negative here.
+    const { currentVersion } = await seedFixture();
+    if (!db) throw new Error("unreachable");
+
+    const weakEmbed: EmbedTextsFn = async (texts) =>
+      texts.map(() => {
+        const vector = new Array<number>(DIMENSIONS).fill(0);
+        vector[0] = 0.1; // weak similarity to alpha's e0 embedding, well below the 0.35 default
+        vector[1000] = Math.sqrt(1 - 0.1 * 0.1);
+        return vector;
+      });
+
+    const result = await investigateLegalProblem({
+      problemDescription: "opis problemu bez pokrycia w tym korpusie",
+      legalActVersionIds: [currentVersion.id],
+      db,
+      embedTexts: weakEmbed,
+      detectIssues: detectionWith([
+        {
+          label: "zagadnienie o słabym dopasowaniu semantycznym",
+          likelihood: "possible",
+          rationale: "rationale",
+          retrievalQueries: ["zapytanie bez pokrycia leksykalnego"],
+        },
+      ]),
+    });
+
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0].retrievedProvisionIds).toEqual([]);
+    expect(result.retrievedProvisions).toEqual([]);
+  });
 });

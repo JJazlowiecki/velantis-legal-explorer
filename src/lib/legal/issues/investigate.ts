@@ -20,6 +20,7 @@ export interface InvestigateLegalProblemOptions {
   limitPerQuery?: number;
   db?: PostgresJsDatabase<typeof schema>;
   embedTexts?: EmbedTextsFn;
+  minVectorSimilarity?: number;
   detectIssues?: DetectLegalIssuesFn;
   detectIssuesOptions?: DetectLegalIssuesOptions;
 }
@@ -31,11 +32,13 @@ export interface RetrievalProvenanceEntry {
   retrievalQuery: string;
   lexicalRank: number | null;
   vectorRank: number | null;
+  vectorSimilarity: number | null;
   isExactCitationMatch: boolean;
   finalScore: number;
 }
 
-export interface DeduplicatedRetrievedProvision extends Omit<HybridSearchResult, "lexicalRank" | "vectorRank" | "isExactCitationMatch" | "finalScore"> {
+export interface DeduplicatedRetrievedProvision
+  extends Omit<HybridSearchResult, "lexicalRank" | "vectorRank" | "vectorSimilarity" | "isExactCitationMatch" | "finalScore"> {
   /** Every issue hypothesis + retrieval query that surfaced this provision. A provision found by
    * multiple hypotheses (or multiple queries within one hypothesis) appears once here, not duplicated. */
   foundBy: RetrievalProvenanceEntry[];
@@ -97,6 +100,7 @@ export async function investigateLegalProblem(
         limit: limitPerQuery,
         db: options.db,
         embedTexts: options.embedTexts,
+        minVectorSimilarity: options.minVectorSimilarity,
       });
 
       for (const hit of searchResult.results) {
@@ -110,6 +114,7 @@ export async function investigateLegalProblem(
           retrievalQuery,
           lexicalRank: hit.lexicalRank,
           vectorRank: hit.vectorRank,
+          vectorSimilarity: hit.vectorSimilarity,
           isExactCitationMatch: hit.isExactCitationMatch,
           finalScore: hit.finalScore,
         };
