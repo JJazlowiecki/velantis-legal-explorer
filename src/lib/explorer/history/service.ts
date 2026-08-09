@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lt } from "drizzle-orm";
+import { and, desc, eq, gte, lt, sql } from "drizzle-orm";
 import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 
 import * as schema from "../../../db/schema";
@@ -191,4 +191,104 @@ export async function clearHistory(input: ClearHistoryInput): Promise<void> {
   await input.db
     .delete(explorerHistoryEntries)
     .where(and(visitorCondition, gte(explorerHistoryEntries.createdAt, input.from), lt(explorerHistoryEntries.createdAt, input.to)));
+}
+
+/**
+ * Serializes automatic-cleanup runs for one visitor behind a transaction-scoped Postgres
+ * advisory lock, namespaced separately from Saved's lock (see
+ * src/lib/explorer/saved/service.ts) so the two features never contend with each other. This
+ * is what keeps two near-simultaneous searches from the same visitor from both reading "304
+ * rows" and both deciding "nothing to trim" — the second write always sees the first's
+ * cleanup effects before running its own.
+ */
+async function lockVisitorForHistoryCleanup(tx: Db, visitorId: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${visitorId} || ':explorer-history'))`);
+}
+
+export interface CleanupHistoryInput {
+  db: Db;
+  visitorId: string;
+  /** Entries with created_at strictly older than (now - retentionDays) are deleted. */
+  retentionDays: number;
+  /** After retention cleanup, only the newest maxEntries rows for this visitor are kept. */
+  maxEntries: number;
+}
+
+/**
+ * Server env validation already requires positive integers for the retention config, but the
+ * service boundary must not trust that a caller went through env parsing — e.g. a
+ * misconfigured/refactored call site passing 0 must not be able to wipe all History. Checked
+ * BEFORE the lock/transaction so an invalid call executes zero DELETEs, not a partial one.
+ * "0" is deliberately rejected rather than treated as "no limit" — this function has exactly
+ * one job (rolling cleanup with positive limits); wiping all History intentionally is
+ * `clearHistory({ scope: "all" })`'s job, not this one's.
+ */
+function assertValidCleanupLimits(retentionDays: number, maxEntries: number): void {
+  for (const [name, value] of [
+    ["retentionDays", retentionDays],
+    ["maxEntries", maxEntries],
+  ] as const) {
+    if (!Number.isFinite(value)) {
+      throw new HistoryServiceError(`cleanupHistoryForVisitor requires a finite ${name}, got ${value}`);
+    }
+    if (!Number.isInteger(value)) {
+      throw new HistoryServiceError(`cleanupHistoryForVisitor requires an integer ${name}, got ${value}`);
+    }
+    if (value <= 0) {
+      throw new HistoryServiceError(`cleanupHistoryForVisitor requires a positive ${name}, got ${value}`);
+    }
+  }
+}
+
+/**
+ * Opportunistic rolling-history cleanup: age-based retention first, then an entry-count cap
+ * (oldest deleted first). Both limits are visitor-scoped — this can never touch another
+ * visitor's rows, and it only ever deletes from explorer_history_entries, never
+ * explorer_saved_items/explorer_saved_folders (Saved is a fully independent copy and must
+ * survive its source History entry being cleaned up). Callers are expected to treat a
+ * rejected promise here as non-fatal to whatever triggered the call.
+ */
+export async function cleanupHistoryForVisitor(input: CleanupHistoryInput): Promise<void> {
+  if (!input.visitorId) {
+    return;
+  }
+
+  assertValidCleanupLimits(input.retentionDays, input.maxEntries);
+
+  await input.db.transaction(async (tx) => {
+    await lockVisitorForHistoryCleanup(tx, input.visitorId);
+
+    const retentionCutoff = new Date(Date.now() - input.retentionDays * 24 * 60 * 60 * 1000);
+    await tx
+      .delete(explorerHistoryEntries)
+      .where(and(eq(explorerHistoryEntries.visitorId, input.visitorId), lt(explorerHistoryEntries.createdAt, retentionCutoff)));
+
+    // Keep only the newest maxEntries rows for this visitor; delete the rest. Written as a
+    // single statement (rather than select-ids-then-delete) so it stays correct under the
+    // advisory lock without a second round trip.
+    await tx.execute(sql`
+      delete from ${explorerHistoryEntries}
+      where id in (
+        select id from ${explorerHistoryEntries}
+        where visitor_id = ${input.visitorId}
+        order by created_at desc, id desc
+        offset ${input.maxEntries}
+      )
+    `);
+  });
+}
+
+/**
+ * Same as cleanupHistoryForVisitor, but never rejects — errors are logged (message only, no
+ * query content) and swallowed. This is the entry point actual callers (e.g.
+ * src/app/explorer/actions.ts) should use: recording a new history entry, and the legal
+ * answer it's attached to, must never fail merely because opportunistic cleanup hit a
+ * problem.
+ */
+export async function safeCleanupHistoryForVisitor(input: CleanupHistoryInput): Promise<void> {
+  try {
+    await cleanupHistoryForVisitor(input);
+  } catch (error) {
+    console.error("[explorer-history] cleanup failed:", error instanceof Error ? `${error.name}: ${error.message}` : "unknown error");
+  }
 }

@@ -33,6 +33,8 @@ const CLEAR_SCOPE_OPTIONS: { value: ClearHistoryScope; label: string }[] = [
 interface HistoryPageContentProps {
   initialEntries: HistoryListItem[];
   historyEnabled: boolean;
+  /** Sanitized server-resolved retention window (days), shown as a subtle informational line only. */
+  retentionDays: number;
 }
 
 function formatDateTime(iso: string): string {
@@ -95,7 +97,7 @@ function HistorySaveButtons({ historyEntryId }: { historyEntryId: string }) {
   );
 }
 
-export function HistoryPageContent({ initialEntries, historyEnabled }: HistoryPageContentProps) {
+export function HistoryPageContent({ initialEntries, historyEnabled, retentionDays }: HistoryPageContentProps) {
   const [entries, setEntries] = useState<HistoryListItem[]>(initialEntries);
   const [filters, setFilters] = useState<HistoryListFilters>(DEFAULT_HISTORY_LIST_FILTERS);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -177,6 +179,8 @@ export function HistoryPageContent({ initialEntries, historyEnabled }: HistoryPa
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-6">
       <SectionHeader eyebrow="Velantis Legal Explorer" title="Historia" description="Przegląd Twoich ostatnich wyszukiwań i odpowiedzi." />
+
+      <p className="text-xs text-muted-foreground">Historia jest przechowywana do {retentionDays} dni. Zapisz odpowiedź lub wyszukiwanie, aby zachować je na stałe.</p>
 
       <Panel className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div className="flex flex-1 flex-col gap-3 md:flex-row md:items-center">
@@ -388,7 +392,7 @@ export function HistoryPageContent({ initialEntries, historyEnabled }: HistoryPa
           ) : null}
 
           <p className="text-xs text-muted-foreground">
-            Zapisane elementy nie są jeszcze obsługiwane w Velantis Legal Explorer, więc czyszczenie historii obejmuje wszystkie pasujące wpisy.
+            Czyszczenie historii nie usuwa elementów zapisanych na stronie Zapisane — te zostają nienaruszone.
           </p>
 
           <div className="flex justify-end gap-2">

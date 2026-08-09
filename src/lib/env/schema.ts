@@ -54,6 +54,23 @@ export const serverEnvSchema = z.object({
     .int("EXPLORER_SAVED_MAX_ITEMS must be an integer")
     .positive("EXPLORER_SAVED_MAX_ITEMS must be a positive integer")
     .default(100),
+  // History retention (see src/lib/explorer/history/service.ts, cleanupHistoryForVisitor).
+  // Two independent limits: entries older than this many days may be deleted, and each
+  // visitor may keep at most EXPLORER_HISTORY_MAX_ENTRIES rows (oldest deleted first once
+  // exceeded). Both are plain numbers passed into the cleanup function by its caller — the
+  // service itself has no opinion on where they came from, so a future plan/account layer
+  // could supply different values per visitor without rewriting persistence. Saved items are
+  // a completely separate table and are never touched by this cleanup.
+  EXPLORER_HISTORY_RETENTION_DAYS: z.coerce
+    .number()
+    .int("EXPLORER_HISTORY_RETENTION_DAYS must be an integer")
+    .positive("EXPLORER_HISTORY_RETENTION_DAYS must be a positive integer")
+    .default(90),
+  EXPLORER_HISTORY_MAX_ENTRIES: z.coerce
+    .number()
+    .int("EXPLORER_HISTORY_MAX_ENTRIES must be an integer")
+    .positive("EXPLORER_HISTORY_MAX_ENTRIES must be a positive integer")
+    .default(300),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;
