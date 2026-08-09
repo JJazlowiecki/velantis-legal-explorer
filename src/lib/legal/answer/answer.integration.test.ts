@@ -10,7 +10,9 @@ import { LegalIssueInvestigationError } from "../issues/investigate";
 import type { LegalIssueDetectionResult } from "../issues/schema";
 import { answerLegalProblem, LegalAnswerError } from "./answer";
 import type { GenerateFinalAnswerFn, GenerateFinalAnswerInput } from "./generate";
+import type { GenerateRecoveryConclusionsFn } from "./recovery";
 import type { RawFinalAnswerResponse } from "./schema";
+import type { RunSkepticalVerificationFn } from "./skeptic";
 import type { VerifyConclusionSupportFn } from "./verify";
 
 const testDatabase = createTestDatabase();
@@ -172,23 +174,45 @@ describeDatabase("answerLegalProblem", () => {
     });
   }
 
-  /** A well-behaved fake verifier: confirms every conclusion using exactly the sources it claimed. */
+  /**
+   * A well-behaved fake stage-1 verifier: confirms every conclusion with direct_support,
+   * using the source's own full text as the "excerpt" — trivially a verbatim substring of
+   * itself, so it always survives the code-level evidence.ts validation.
+   */
   const supportAllVerifier: VerifyConclusionSupportFn = async (input) => {
     return input.conclusions.map((conclusion) => ({
       conclusionIndex: conclusion.conclusionIndex,
-      supported: true,
+      verdict: "direct_support" as const,
       reason: "Treść źródła wprost potwierdza twierdzenie.",
-      supportingSourceIds: conclusion.sources.map((s) => s.sourceId),
+      evidence: conclusion.sources.map((s) => ({ sourceId: s.sourceId, excerpt: s.text })),
     }));
   };
 
-  /** A fake verifier that rejects every conclusion regardless of plausibility — never rescues via memory. */
+  /** A fake stage-1 verifier that rejects every conclusion regardless of plausibility — never rescues via memory. */
   const rejectAllVerifier: VerifyConclusionSupportFn = async (input) => {
     return input.conclusions.map((conclusion) => ({
       conclusionIndex: conclusion.conclusionIndex,
-      supported: false,
+      verdict: "no_support" as const,
       reason: "Źródło nie dotyczy substantywnie tego twierdzenia.",
-      supportingSourceIds: [],
+      evidence: [],
+    }));
+  };
+
+  /** A well-behaved fake stage-2 skeptic: finds no unsupported leap in anything it reviews. */
+  const noLeapSkeptic: RunSkepticalVerificationFn = async (input) => {
+    return input.conclusions.map((conclusion) => ({
+      conclusionIndex: conclusion.conclusionIndex,
+      hasUnsupportedLeap: false,
+      reason: "Potwierdzony dowód w pełni ustanawia twierdzenie.",
+    }));
+  };
+
+  /** A fake stage-2 skeptic that always finds an unsupported leap — for testing stage-2 rejection. */
+  const alwaysLeapSkeptic: RunSkepticalVerificationFn = async (input) => {
+    return input.conclusions.map((conclusion) => ({
+      conclusionIndex: conclusion.conclusionIndex,
+      hasUnsupportedLeap: true,
+      reason: "Twierdzenie rozszerza zakres przepisu poza to, co ustanawia dowód.",
     }));
   };
 
@@ -259,6 +283,7 @@ describeDatabase("answerLegalProblem", () => {
       ]),
       generateFinalAnswer: groundedAnswer(),
       verifyConclusionSupport: supportAllVerifier,
+      runSkepticalVerification: noLeapSkeptic,
     });
 
     expect(result.status).toBe("answered");
@@ -309,6 +334,7 @@ describeDatabase("answerLegalProblem", () => {
         uncertainties: [],
       }),
       verifyConclusionSupport: supportAllVerifier,
+      runSkepticalVerification: noLeapSkeptic,
     });
 
     expect(result.conclusions).toHaveLength(2);
@@ -348,6 +374,7 @@ describeDatabase("answerLegalProblem", () => {
         uncertainties: ["Nie wiadomo, czy strony ustaliły termin wykonania."],
       }),
       verifyConclusionSupport: supportAllVerifier,
+      runSkepticalVerification: noLeapSkeptic,
     });
 
     expect(result.conclusions).toHaveLength(1);
@@ -407,6 +434,7 @@ describeDatabase("answerLegalProblem", () => {
       ]),
       generateFinalAnswer: groundedAnswer(),
       verifyConclusionSupport: supportAllVerifier,
+      runSkepticalVerification: noLeapSkeptic,
     });
 
     expect(result.conclusions[0].support[0]).toMatchObject({
@@ -431,6 +459,7 @@ describeDatabase("answerLegalProblem", () => {
       ]),
       generateFinalAnswer: groundedAnswer(),
       verifyConclusionSupport: supportAllVerifier,
+      runSkepticalVerification: noLeapSkeptic,
     });
 
     // versionKind "promulgated" + currentnessStatus "unproven" must survive untouched —
@@ -469,6 +498,7 @@ describeDatabase("answerLegalProblem", () => {
       ]),
       generateFinalAnswer: groundedAnswer(),
       verifyConclusionSupport: supportAllVerifier,
+      runSkepticalVerification: noLeapSkeptic,
     });
 
     const provisionIds = result.sources.map((s) => s.legalProvisionId);
@@ -489,6 +519,7 @@ describeDatabase("answerLegalProblem", () => {
       ]),
       generateFinalAnswer: groundedAnswer(),
       verifyConclusionSupport: supportAllVerifier,
+      runSkepticalVerification: noLeapSkeptic,
     });
 
     const suppliedIds = new Set(result.sources.map((s) => s.legalProvisionId));
@@ -514,11 +545,175 @@ describeDatabase("answerLegalProblem", () => {
         ]),
         generateFinalAnswer: groundedAnswer(),
         verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
       });
 
       expect(result.status).toBe("answered");
       expect(result.conclusions).toHaveLength(1);
       expect(result.conclusions[0].support[0].legalProvisionId).toBe(alpha.id);
+    });
+
+    it("invented excerpt: verdict=direct_support but the returned excerpt does not occur verbatim in the source text is deterministically rejected", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const invalidExcerptVerifier: VerifyConclusionSupportFn = async (input) => {
+        return input.conclusions.map((conclusion) => ({
+          conclusionIndex: conclusion.conclusionIndex,
+          verdict: "direct_support" as const,
+          reason: "reason",
+          // Not present verbatim anywhere in the fixture's art. 471 text — an invented/paraphrased excerpt.
+          evidence: [{ sourceId: conclusion.sources[0].sourceId, excerpt: "Sąsiad odpowiada za wycięcie drzewa bez zgody właściciela." }],
+        }));
+      };
+      const skepticSpy = vi.fn(noLeapSkeptic);
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: invalidExcerptVerifier,
+        runSkepticalVerification: skepticSpy,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      // fail-closed before stage 2: an invented excerpt never even reaches the skeptical pass
+      expect(skepticSpy).not.toHaveBeenCalled();
+    });
+
+    it("partial support: verdict=partial_support is rejected, never upgraded to a verified conclusion", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const partialSupportVerifier: VerifyConclusionSupportFn = async (input) => {
+        return input.conclusions.map((conclusion) => ({
+          conclusionIndex: conclusion.conclusionIndex,
+          verdict: "partial_support" as const,
+          reason: "Źródło potwierdza tylko część szerszej tezy — resztę pomija.",
+          evidence: [],
+        }));
+      };
+      const skepticSpy = vi.fn(noLeapSkeptic);
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: partialSupportVerifier,
+        runSkepticalVerification: skepticSpy,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      expect(skepticSpy).not.toHaveBeenCalled();
+    });
+
+    it("procedural-to-substantive scope expansion: stage 1 passes but the skeptical pass catches it and rejects", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      // Stage 1 is fooled: the excerpt is real and verbatim, so code-level validation passes.
+      // Only the adversarial skeptical pass is positioned to catch that a procedural debtor-
+      // liability provision has been generalized into an unrelated neighbor-tort claim.
+      const result = await answerLegalProblem({
+        problemDescription: "sąsiad ściął moje drzewo bez pytania, czy mogę żądać odszkodowania?",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "roszczenie odszkodowawcze wobec sąsiada", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: async (input) => ({
+          answer: "Błędna odpowiedź oparta na nietrafnym przepisie.",
+          conclusions: [
+            {
+              statement: "Sąsiad ponosi odpowiedzialność odszkodowawczą za wycięcie drzewa na podstawie art. 471.",
+              support: [{ sourceId: input.sources[0].sourceId }],
+            },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: alwaysLeapSkeptic,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      expect(
+        result.alternativePaths.some((path) => path.issueLabel.includes("Sąsiad ponosi odpowiedzialność odszkodowawczą")),
+      ).toBe(true);
+    });
+
+    it("first verifier passes, skeptic finds no unsupported leap: conclusion survives", async () => {
+      const { currentVersion, alpha } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const skepticSpy = vi.fn(noLeapSkeptic);
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: skepticSpy,
+      });
+
+      expect(result.status).toBe("answered");
+      expect(result.conclusions).toHaveLength(1);
+      expect(result.conclusions[0].support[0].legalProvisionId).toBe(alpha.id);
+      expect(skepticSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("batching: exactly one strict-verification call and one skeptical call regardless of the number of conclusions (never one call per conclusion)", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const verifySpy = vi.fn(supportAllVerifier);
+      const skepticSpy = vi.fn(noLeapSkeptic);
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        limitPerQuery: 5,
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue A", likelihood: "most_likely", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+          { label: "issue B", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_BETA"] },
+        ]),
+        generateFinalAnswer: async (input) => ({
+          answer: "Odpowiedź.",
+          conclusions: input.sources.map((source) => ({
+            statement: `Teza dotycząca ${source.citationLabel}.`,
+            support: [{ sourceId: source.sourceId }],
+          })),
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: verifySpy,
+        runSkepticalVerification: skepticSpy,
+      });
+
+      expect(result.conclusions.length).toBeGreaterThan(1);
+      expect(verifySpy).toHaveBeenCalledTimes(1);
+      expect(skepticSpy).toHaveBeenCalledTimes(1);
     });
 
     it("B: a real citation that does not substantively support the exact claim is demoted, not kept as a conclusion", async () => {
@@ -531,9 +726,9 @@ describeDatabase("answerLegalProblem", () => {
       const misapplyingVerifier: VerifyConclusionSupportFn = async (input) => {
         return input.conclusions.map((conclusion) => ({
           conclusionIndex: conclusion.conclusionIndex,
-          supported: false,
+          verdict: "no_support" as const,
           reason: "Źródło dotyczy odpowiedzialności dłużnika za nienależyte wykonanie zobowiązania, a nie roszczeń sąsiedzkich za wycięcie drzewa.",
-          supportingSourceIds: [],
+          evidence: [],
         }));
       };
 
@@ -600,9 +795,12 @@ describeDatabase("answerLegalProblem", () => {
       const mixedVerifier: VerifyConclusionSupportFn = async (input) => {
         return input.conclusions.map((conclusion) => ({
           conclusionIndex: conclusion.conclusionIndex,
-          supported: conclusion.conclusionIndex === 0,
+          verdict: conclusion.conclusionIndex === 0 ? ("direct_support" as const) : ("no_support" as const),
           reason: conclusion.conclusionIndex === 0 ? "Źródło potwierdza tezę." : "Źródło nie potwierdza tezy.",
-          supportingSourceIds: conclusion.conclusionIndex === 0 ? conclusion.sources.map((s) => s.sourceId) : [],
+          evidence:
+            conclusion.conclusionIndex === 0
+              ? conclusion.sources.map((s) => ({ sourceId: s.sourceId, excerpt: s.text }))
+              : [],
         }));
       };
 
@@ -624,6 +822,7 @@ describeDatabase("answerLegalProblem", () => {
           uncertainties: [],
         }),
         verifyConclusionSupport: mixedVerifier,
+        runSkepticalVerification: noLeapSkeptic,
       });
 
       expect(result.status).toBe("answered");
@@ -662,9 +861,9 @@ describeDatabase("answerLegalProblem", () => {
       const fabricatingVerifier: VerifyConclusionSupportFn = async (input) => {
         return input.conclusions.map((conclusion) => ({
           conclusionIndex: conclusion.conclusionIndex,
-          supported: true,
+          verdict: "direct_support" as const,
           reason: "reason",
-          supportingSourceIds: ["SOURCE_FABRICATED_BY_VERIFIER"],
+          evidence: [{ sourceId: "SOURCE_FABRICATED_BY_VERIFIER", excerpt: "cokolwiek" }],
         }));
       };
 
@@ -697,6 +896,7 @@ describeDatabase("answerLegalProblem", () => {
         ]),
         generateFinalAnswer: groundedAnswer({ uncertainties: [] }),
         verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
       });
 
       expect(result.status).toBe("answered");
@@ -717,6 +917,7 @@ describeDatabase("answerLegalProblem", () => {
           ]),
           generateFinalAnswer: groundedAnswer(),
           verifyConclusionSupport: supportAllVerifier,
+          runSkepticalVerification: noLeapSkeptic,
         }),
       ).rejects.toThrow(LegalIssueInvestigationError);
     });
@@ -730,9 +931,12 @@ describeDatabase("answerLegalProblem", () => {
       const mixedVerifier: VerifyConclusionSupportFn = async (input) => {
         return input.conclusions.map((conclusion) => ({
           conclusionIndex: conclusion.conclusionIndex,
-          supported: conclusion.conclusionIndex === 0,
+          verdict: conclusion.conclusionIndex === 0 ? ("direct_support" as const) : ("no_support" as const),
           reason: conclusion.conclusionIndex === 0 ? "Źródło potwierdza tezę." : "Źródło nie potwierdza tezy.",
-          supportingSourceIds: conclusion.conclusionIndex === 0 ? conclusion.sources.map((s) => s.sourceId) : [],
+          evidence:
+            conclusion.conclusionIndex === 0
+              ? conclusion.sources.map((s) => ({ sourceId: s.sourceId, excerpt: s.text }))
+              : [],
         }));
       };
 
@@ -758,6 +962,7 @@ describeDatabase("answerLegalProblem", () => {
           uncertainties: [],
         }),
         verifyConclusionSupport: mixedVerifier,
+        runSkepticalVerification: noLeapSkeptic,
       });
 
       expect(result.status).toBe("answered");
@@ -809,6 +1014,7 @@ describeDatabase("answerLegalProblem", () => {
         ]),
         generateFinalAnswer: groundedAnswer({ uncertainties: [] }),
         verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
       });
 
       expect(result.status).toBe("answered");
@@ -830,18 +1036,20 @@ describeDatabase("answerLegalProblem", () => {
         ]),
         generateFinalAnswer: groundedAnswer(),
         verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
       });
 
       expect(result.status).toBe("answered");
       expect(result.answer).toContain("art. 471");
     });
 
-    it("5: no extra OpenAI-style call is made for final prose construction — only generateFinalAnswer and verifyConclusionSupport are invoked", async () => {
+    it("5: no extra OpenAI-style call is made for final prose construction — only generateFinalAnswer, verifyConclusionSupport, and runSkepticalVerification are invoked, each exactly once", async () => {
       const { currentVersion } = await seedFixture();
       if (!db) throw new Error("unreachable");
 
       const generateSpy = vi.fn(groundedAnswer());
       const verifySpy = vi.fn(supportAllVerifier);
+      const skepticSpy = vi.fn(noLeapSkeptic);
 
       await answerLegalProblem({
         problemDescription: "opis problemu",
@@ -853,10 +1061,12 @@ describeDatabase("answerLegalProblem", () => {
         ]),
         generateFinalAnswer: generateSpy,
         verifyConclusionSupport: verifySpy,
+        runSkepticalVerification: skepticSpy,
       });
 
       expect(generateSpy).toHaveBeenCalledTimes(1);
       expect(verifySpy).toHaveBeenCalledTimes(1);
+      expect(skepticSpy).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -876,6 +1086,7 @@ describeDatabase("answerLegalProblem", () => {
         // the fake model deliberately omits any currentness caveat of its own
         generateFinalAnswer: groundedAnswer({ uncertainties: [] }),
         verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
       });
 
       expect(
@@ -897,6 +1108,7 @@ describeDatabase("answerLegalProblem", () => {
         ]),
         generateFinalAnswer: groundedAnswer({ uncertainties: [] }),
         verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
       });
 
       expect(
@@ -925,6 +1137,400 @@ describeDatabase("answerLegalProblem", () => {
       });
 
       expect(result.uncertainties.some((entry) => entry.toLowerCase().includes("aktualność"))).toBe(false);
+    });
+  });
+
+  describe("source-first recovery pass", () => {
+    /**
+     * A verifier fake that rejects any statement UNLESS it was produced by the recovery pass
+     * (marked with a "RECOVERY_" prefix) — lets a single injected verifyConclusionSupport
+     * simulate "first draft rejected, recovery draft grounded" across the two separate
+     * verifyDraftConclusions calls the real pipeline makes (first pass, then recovery).
+     */
+    const rejectDraftAcceptRecoveryVerifier: VerifyConclusionSupportFn = async (input) => {
+      return input.conclusions.map((conclusion) => {
+        const isRecovery = conclusion.statement.startsWith("RECOVERY_");
+        return {
+          conclusionIndex: conclusion.conclusionIndex,
+          verdict: isRecovery ? ("direct_support" as const) : ("no_support" as const),
+          reason: isRecovery ? "Źródło wprost ustanawia tezę odzyskaną." : "Nie potwierdzono.",
+          evidence: isRecovery ? conclusion.sources.map((s) => ({ sourceId: s.sourceId, excerpt: s.text })) : [],
+        };
+      });
+    };
+
+    /** A well-behaved fake stage-2 skeptic — reused from the outer describe's noLeapSkeptic pattern. */
+    const recoveryNoLeapSkeptic = noLeapSkeptic;
+
+    it("A: normal generation succeeds => recovery is NOT called", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy = vi.fn();
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("answered");
+      expect(recoverySpy).not.toHaveBeenCalled();
+    });
+
+    it("B: zero retrieval => recovery is NOT called", async () => {
+      const { unindexedVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy = vi.fn();
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu bez pokrycia w korpusie",
+        legalActVersionIds: [unindexedVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          {
+            label: "zagadnienie bez pokrycia",
+            likelihood: "needs_more_information",
+            rationale: "rationale",
+            retrievalQueries: ["KEYWORD_NONEXISTENT"],
+          },
+        ]),
+        generateFinalAnswer: vi.fn(),
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(recoverySpy).not.toHaveBeenCalled();
+    });
+
+    it("C: first pass all rejected + relevant sources exist => recovery called exactly once", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy = vi.fn(async () => ({ conclusions: [], uncertainties: [] }));
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: rejectAllVerifier,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("D: a recovery conclusion with a real, self-validated excerpt passes through the full verification pipeline and survives", async () => {
+      const { currentVersion, alpha } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_Dłużnik odpowiada za nienależyte wykonanie zobowiązania.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+          },
+        ],
+        uncertainties: [],
+      });
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: async (input) => ({
+          answer: "Odpowiedź.",
+          conclusions: [{ statement: "Teza odrzucona w pierwszej próbie.", support: [{ sourceId: input.sources[0].sourceId }] }],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: rejectDraftAcceptRecoveryVerifier,
+        runSkepticalVerification: recoveryNoLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("answered");
+      expect(result.conclusions).toHaveLength(1);
+      expect(result.conclusions[0].statement).toBe("RECOVERY_Dłużnik odpowiada za nienależyte wykonanie zobowiązania.");
+      expect(result.conclusions[0].support[0].legalProvisionId).toBe(alpha.id);
+    });
+
+    it("E: a recovery conclusion with an invented (non-verbatim) excerpt is rejected before it ever reaches the verifier", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const verifySpy = vi.fn(rejectAllVerifier);
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_Twierdzenie z wymyślonym cytatem.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: "Ten fragment nie istnieje w żadnym źródle." }],
+          },
+        ],
+        uncertainties: [],
+      });
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: verifySpy,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      // only the first pass ever reached the verifier — the fabricated recovery excerpt was
+      // dropped deterministically before verifyDraftConclusions was even called a second time
+      expect(verifySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("F: a recovery conclusion citing an unknown SOURCE_X is rejected before it ever reaches the verifier", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const verifySpy = vi.fn(rejectAllVerifier);
+      const recoverySpy: GenerateRecoveryConclusionsFn = async () => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_Twierdzenie z nieistniejącym źródłem.",
+            support: [{ sourceId: "SOURCE_FABRICATED_BY_RECOVERY", excerpt: "cokolwiek" }],
+          },
+        ],
+        uncertainties: [],
+      });
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: verifySpy,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      expect(verifySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("G: a recovery conclusion passes strict verification but the skeptic catches an unsupported leap => rejected", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_Twierdzenie z nieuprawnionym skokiem logicznym.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+          },
+        ],
+        uncertainties: [],
+      });
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: rejectDraftAcceptRecoveryVerifier,
+        runSkepticalVerification: alwaysLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      expect(
+        result.alternativePaths.some((path) => path.issueLabel.startsWith("RECOVERY_")),
+      ).toBe(true);
+    });
+
+    it("H: recovery also fails (returns zero conclusions) => final result is insufficient_evidence", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy = vi.fn(async () => ({ conclusions: [], uncertainties: [] }));
+      const verifySpy = vi.fn(rejectAllVerifier);
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: verifySpy,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+      // recovery produced nothing, so verifyDraftConclusions short-circuits without a 2nd call
+      expect(verifySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("I: when recovery succeeds, the final answer contains only the recovery conclusions that passed all gates", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_Jedyna zweryfikowana teza.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+          },
+        ],
+        uncertainties: [],
+      });
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: async (input) => ({
+          answer: "TWIERDZENIE_TYLKO_W_DRAFCIE_NIGDY_NIE_POWINNO_TRAFIC_DO_UZYTKOWNIKA",
+          conclusions: [
+            { statement: "Teza odrzucona w pierwszej próbie.", support: [{ sourceId: input.sources[0].sourceId }] },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: rejectDraftAcceptRecoveryVerifier,
+        runSkepticalVerification: recoveryNoLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("answered");
+      expect(result.conclusions).toHaveLength(1);
+      expect(result.conclusions[0].statement).toBe("RECOVERY_Jedyna zweryfikowana teza.");
+    });
+
+    it("J: no rejected first-pass claim leaks anywhere into the recovery-produced final answer", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_Jedyna zweryfikowana teza.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+          },
+        ],
+        uncertainties: [],
+      });
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: async (input) => ({
+          answer: "TWIERDZENIE_ODRZUCONE_W_PIERWSZEJ_PROBIE_NIGDY_NIE_MOZE_WYCIEC",
+          conclusions: [
+            { statement: "TWIERDZENIE_ODRZUCONE_W_PIERWSZEJ_PROBIE_NIGDY_NIE_MOZE_WYCIEC", support: [{ sourceId: input.sources[0].sourceId }] },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: rejectDraftAcceptRecoveryVerifier,
+        runSkepticalVerification: recoveryNoLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("answered");
+      // Deliberately checks only the user-facing prose (result.answer), not the whole result:
+      // demoted/rejected claims are EXPECTED to remain visible in the structured
+      // alternativePaths array for transparency (existing, established design from the prior
+      // grounding-stability milestone — see buildDeterministicAnswerText, which only ever
+      // renders draftAlternativePaths into prose, never demotedAlternativePaths). The actual
+      // leak this guards against is a rejected claim being narrated as if it were verified.
+      expect(result.answer).not.toContain("TWIERDZENIE_ODRZUCONE_W_PIERWSZEJ_PROBIE_NIGDY_NIE_MOZE_WYCIEC");
+      expect(result.answer).toContain("RECOVERY_Jedyna zweryfikowana teza.");
+    });
+
+    it("K: an out-of-domain query does not become an answer merely because a recovery pass exists — recovery is subject to the exact same grounding gates", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      // Simulates the adversarial "sąsiad wyciął drzewo" pattern: recovery proposes a
+      // plausible-looking claim with a REAL, self-validated excerpt from a real source, but
+      // the (unconditionally rejecting) verifier still correctly judges the source doesn't
+      // establish this specific proposition — recovery grants no shortcut around that judgment.
+      const recoverySpy = vi.fn<GenerateRecoveryConclusionsFn>(async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_Sąsiad odpowiada odszkodowawczo za wycięcie drzewa.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+          },
+        ],
+        uncertainties: [],
+      }));
+
+      const result = await answerLegalProblem({
+        problemDescription: "sąsiad ściął moje drzewo bez pytania, czy mogę żądać odszkodowania?",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "roszczenie odszkodowawcze wobec sąsiada", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: async (input) => ({
+          answer: "Błędna odpowiedź.",
+          conclusions: [
+            { statement: "Sąsiad ponosi odpowiedzialność za wycięcie drzewa.", support: [{ sourceId: input.sources[0].sourceId }] },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: rejectAllVerifier,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
     });
   });
 });

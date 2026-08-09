@@ -8,7 +8,8 @@ const chatCompletionEnvelopeSchema = z.object({
   choices: z
     .array(
       z.object({
-        message: z.object({ content: z.string().nullable() }),
+        message: z.object({ content: z.string().nullable(), refusal: z.string().nullable().optional() }),
+        finish_reason: z.string().nullable().optional(),
       }),
     )
     .min(1),
@@ -98,6 +99,64 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
+/**
+ * Builds a request-scoped OpenAI strict Structured Outputs JSON Schema. The critical property
+ * is `support.items.properties.sourceId.enum`: it is constrained to EXACTLY the SOURCE_X
+ * identifiers supplied in this request, so the model is structurally unable to emit an
+ * invented id like "SOURCE_171" — this is the live failure this hardening pass closes.
+ * Zod validation (buildRawFinalAnswerResponseSchema) still runs afterward as defense in
+ * depth; strict Structured Outputs narrows the failure surface, it does not replace Zod.
+ */
+function buildFinalAnswerJsonSchema(sourceIds: string[]) {
+  const sourceReferenceSchema = {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      sourceId: { type: "string", enum: sourceIds },
+    },
+    required: ["sourceId"],
+  };
+
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      answer: { type: "string" },
+      conclusions: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            statement: { type: "string" },
+            support: { type: "array", items: sourceReferenceSchema },
+          },
+          required: ["statement", "support"],
+        },
+      },
+      alternativePaths: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            issueLabel: { type: "string" },
+            explanation: { type: "string" },
+            support: { type: "array", items: sourceReferenceSchema },
+          },
+          required: ["issueLabel", "explanation", "support"],
+        },
+      },
+      uncertainties: { type: "array", items: { type: "string" } },
+      // Strict mode requires every property to be listed in `required`; there is no way to
+      // express "optional" directly. Modeled as nullable instead — null means "not asked",
+      // normalized away before Zod parsing (see parseChatCompletionContent).
+      clarificationQuestion: { type: ["string", "null"] },
+    },
+    required: ["answer", "conclusions", "alternativePaths", "uncertainties", "clarificationQuestion"],
+  };
+}
+
 function formatSourceForPrompt(source: PackedSource): string {
   const hierarchy = source.hierarchy.length > 0 ? source.hierarchy.join(" / ") : "(brak dodatkowego kontekstu)";
   return [
@@ -145,8 +204,10 @@ export async function generateFinalAnswer(
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   const fetchImpl = options.fetchImpl ?? fetch;
 
-  const validSourceIds = new Set(input.sources.map((source) => source.sourceId));
+  const sourceIds = input.sources.map((source) => source.sourceId);
+  const validSourceIds = new Set(sourceIds);
   const responseSchema = buildRawFinalAnswerResponseSchema(validSourceIds);
+  const jsonSchema = buildFinalAnswerJsonSchema(sourceIds);
   const userMessage = buildUserMessage(input);
 
   for (let attempt = 0; ; attempt += 1) {
@@ -161,7 +222,10 @@ export async function generateFinalAnswer(
         body: JSON.stringify({
           model,
           temperature: 0,
-          response_format: { type: "json_object" },
+          response_format: {
+            type: "json_schema",
+            json_schema: { name: "final_answer", strict: true, schema: jsonSchema },
+          },
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
             { role: "user", content: userMessage },
@@ -222,7 +286,27 @@ function parseChatCompletionContent(
     throw new FinalAnswerGenerationError("OpenAI chat completion response has an unexpected shape", "INVALID_RESPONSE");
   }
 
-  const content = envelope.data.choices[0]?.message.content;
+  const choice = envelope.data.choices[0];
+  if (!choice) {
+    throw new FinalAnswerGenerationError("OpenAI chat completion response has no choices", "INVALID_RESPONSE");
+  }
+
+  // Under strict Structured Outputs the model can refuse (message.refusal set) instead of
+  // producing schema-conforming JSON, or the response can be cut short (finish_reason other
+  // than "stop", e.g. "length" for truncation or "content_filter"). Neither is a valid legal
+  // answer — fail closed with a typed, internal error rather than attempting to parse
+  // partial/refused content as if it were a real response.
+  if (choice.message.refusal) {
+    throw new FinalAnswerGenerationError("OpenAI declined to produce a structured final answer", "INVALID_RESPONSE");
+  }
+  if (choice.finish_reason && choice.finish_reason !== "stop") {
+    throw new FinalAnswerGenerationError(
+      `OpenAI final-answer response did not complete normally (finish_reason: ${choice.finish_reason})`,
+      "INVALID_RESPONSE",
+    );
+  }
+
+  const content = choice.message.content;
   if (!content) {
     throw new FinalAnswerGenerationError("OpenAI chat completion response has no content", "INVALID_RESPONSE");
   }
@@ -234,16 +318,15 @@ function parseChatCompletionContent(
     throw new FinalAnswerGenerationError("Model response was not valid JSON", "INVALID_RESPONSE");
   }
 
-  // Some models emit "" instead of omitting an unused optional field under plain JSON
-  // mode (no strict json_schema enforcement) — normalize that to "no clarification
-  // needed" rather than rejecting an otherwise well-formed, correctly grounded response.
-  if (
-    parsedContent &&
-    typeof parsedContent === "object" &&
-    "clarificationQuestion" in parsedContent &&
-    (parsedContent as { clarificationQuestion?: unknown }).clarificationQuestion === ""
-  ) {
-    delete (parsedContent as { clarificationQuestion?: unknown }).clarificationQuestion;
+  // Strict Structured Outputs models "optional" as nullable (see buildFinalAnswerJsonSchema):
+  // an unused clarificationQuestion arrives as null rather than omitted. Some models may also
+  // still emit "" under this contract. Normalize both to "no clarification needed" before Zod
+  // parsing, rather than rejecting an otherwise well-formed, correctly grounded response.
+  if (parsedContent && typeof parsedContent === "object" && "clarificationQuestion" in parsedContent) {
+    const value = (parsedContent as { clarificationQuestion?: unknown }).clarificationQuestion;
+    if (value === "" || value === null) {
+      delete (parsedContent as { clarificationQuestion?: unknown }).clarificationQuestion;
+    }
   }
 
   const result = responseSchema.safeParse(parsedContent);

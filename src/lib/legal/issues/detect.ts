@@ -9,11 +9,46 @@ const chatCompletionEnvelopeSchema = z.object({
   choices: z
     .array(
       z.object({
-        message: z.object({ content: z.string().nullable() }),
+        message: z.object({ content: z.string().nullable(), refusal: z.string().nullable().optional() }),
+        finish_reason: z.string().nullable().optional(),
       }),
     )
     .min(1),
 });
+
+/**
+ * OpenAI strict Structured Outputs JSON Schema for issue detection. This contract has no
+ * request-scoped identifiers to constrain (unlike generate/verify/skeptic, which must
+ * restrict SOURCE_X/conclusionIndex to values that actually exist for that request), so it
+ * is a single static schema rather than a per-request builder. Zod (legalIssueDetectionResultSchema)
+ * still runs afterward as defense in depth, in particular for the >=1 issue / >=1
+ * retrievalQuery constraints that strict Structured Outputs cannot express (no minItems).
+ */
+const ISSUE_DETECTION_JSON_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    summary: { type: "string" },
+    issues: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          label: { type: "string" },
+          likelihood: { type: "string", enum: ["most_likely", "possible", "needs_more_information"] },
+          rationale: { type: "string" },
+          retrievalQueries: { type: "array", items: { type: "string" } },
+        },
+        required: ["label", "likelihood", "rationale", "retrievalQueries"],
+      },
+    },
+    // Strict mode requires every property in `required`; modeled as nullable to express
+    // "optional" (null = not asked), normalized away before Zod parsing.
+    clarificationQuestion: { type: ["string", "null"] },
+  },
+  required: ["summary", "issues", "clarificationQuestion"],
+} as const;
 
 const DEFAULT_MODEL = "gpt-4o-mini";
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -107,7 +142,10 @@ export async function detectLegalIssues(
         body: JSON.stringify({
           model,
           temperature: 0,
-          response_format: { type: "json_object" },
+          response_format: {
+            type: "json_schema",
+            json_schema: { name: "issue_detection", strict: true, schema: ISSUE_DETECTION_JSON_SCHEMA },
+          },
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
             { role: "user", content: trimmedProblem },
@@ -165,7 +203,22 @@ function parseChatCompletionContent(payload: unknown): LegalIssueDetectionResult
     throw new IssueDetectionError("OpenAI chat completion response has an unexpected shape", "INVALID_RESPONSE");
   }
 
-  const content = envelope.data.choices[0]?.message.content;
+  const choice = envelope.data.choices[0];
+  if (!choice) {
+    throw new IssueDetectionError("OpenAI chat completion response has no choices", "INVALID_RESPONSE");
+  }
+
+  if (choice.message.refusal) {
+    throw new IssueDetectionError("OpenAI declined to produce a structured issue-detection response", "INVALID_RESPONSE");
+  }
+  if (choice.finish_reason && choice.finish_reason !== "stop") {
+    throw new IssueDetectionError(
+      `OpenAI issue detection response did not complete normally (finish_reason: ${choice.finish_reason})`,
+      "INVALID_RESPONSE",
+    );
+  }
+
+  const content = choice.message.content;
   if (!content) {
     throw new IssueDetectionError("OpenAI chat completion response has no content", "INVALID_RESPONSE");
   }
@@ -175,6 +228,16 @@ function parseChatCompletionContent(payload: unknown): LegalIssueDetectionResult
     parsedContent = JSON.parse(content);
   } catch {
     throw new IssueDetectionError("Model response was not valid JSON", "INVALID_RESPONSE");
+  }
+
+  // Strict Structured Outputs models "optional" as nullable: an unused clarificationQuestion
+  // arrives as null rather than omitted. Normalize to "no clarification needed" before Zod
+  // parsing, rather than rejecting an otherwise well-formed response.
+  if (parsedContent && typeof parsedContent === "object" && "clarificationQuestion" in parsedContent) {
+    const value = (parsedContent as { clarificationQuestion?: unknown }).clarificationQuestion;
+    if (value === "" || value === null) {
+      delete (parsedContent as { clarificationQuestion?: unknown }).clarificationQuestion;
+    }
   }
 
   const result = legalIssueDetectionResultSchema.safeParse(parsedContent);

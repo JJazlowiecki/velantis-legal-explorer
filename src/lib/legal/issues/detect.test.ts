@@ -62,6 +62,53 @@ describe("detectLegalIssues", () => {
     expect(String(init.body)).not.toContain("super-secret-key");
   });
 
+  it("uses strict json_schema Structured Outputs with required fields and no additional properties", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
+    await detectLegalIssues("opis problemu", { apiKey: "test-key", fetchImpl });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+
+    expect(body.response_format.type).toBe("json_schema");
+    expect(body.response_format.json_schema.strict).toBe(true);
+
+    const schema = body.response_format.json_schema.schema;
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.required).toEqual(["summary", "issues", "clarificationQuestion"]);
+    expect(schema.properties.issues.items.required).toEqual(["label", "likelihood", "rationale", "retrievalQueries"]);
+    expect(schema.properties.issues.items.properties.likelihood.enum).toEqual([
+      "most_likely",
+      "possible",
+      "needs_more_information",
+    ]);
+  });
+
+  it("tolerates a null clarificationQuestion (strict mode's way of expressing 'not asked')", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(withContent({ ...validPayload, clarificationQuestion: null }));
+    const result = await detectLegalIssues("opis problemu", { apiKey: "test-key", fetchImpl });
+    expect(result.clarificationQuestion).toBeUndefined();
+  });
+
+  it("fails closed when the model refuses to produce a structured response", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      chatResponse(200, { choices: [{ message: { content: null, refusal: "cannot comply" }, finish_reason: "stop" }] }),
+    );
+
+    await expect(
+      detectLegalIssues("opis problemu", { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("fails closed when the response is truncated (finish_reason=length)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      chatResponse(200, { choices: [{ message: { content: JSON.stringify(validPayload) }, finish_reason: "length" }] }),
+    );
+
+    await expect(
+      detectLegalIssues("opis problemu", { apiKey: "test-key", fetchImpl, maxRetries: 0 }),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
   it("rejects malformed JSON returned by the model", async () => {
     const fetchImpl = vi
       .fn()
