@@ -21,6 +21,15 @@ export interface CurrentLawVersionInput {
 	authorityClass: string;
 	hasStructure: boolean;
 	legalStateDate: string | null;
+	/**
+	 * Row creation time — used ONLY to deterministically pick among multiple immutable PARSED
+	 * CONTENT REVISIONS of the SAME announcement (see content-hash.ts / consolidated-ingest.ts):
+	 * once a parser fix produces a corrected revision, more than one `legal_act_versions` row can
+	 * legitimately share one `sourceAnnouncementLegalActId`. This is purely a technical
+	 * content-revision tie-break, never a legal-effective-date comparison — that's what
+	 * `legalStateDate` is for, and it stays untouched here.
+	 */
+	createdAt: string;
 }
 
 export interface CurrentLawCandidateInput {
@@ -168,10 +177,21 @@ export function evaluateCurrentLawCandidate(
 	// Matching is validated on every relevant field, not sourceAnnouncementLegalActId alone —
 	// a malformed/inconsistent row (wrong versionKind/sourceExpressionId/authorityClass) is
 	// treated as absent evidence, never trusted.
+	//
+	// More than one row can now legitimately match: a parser fix produces a NEW immutable content
+	// revision for the SAME announcement rather than replacing the old one in place (see
+	// content-hash.ts). Among all valid matches, deterministically prefer the MOST RECENTLY
+	// created content revision (ties broken by id) — "latest successfully parsed content
+	// compatible with the current parser/content rules", never the legal announcement's own date
+	// (that's `selectedAnnouncement`, already fixed above; this is purely a technical
+	// content-revision tie-break among rows that all share the same announcement).
 	const rawMatches = versions.filter(
 		(v) => v.sourceAnnouncementLegalActId === selectedAnnouncement.relatedLegalActId,
 	);
-	const validMatch = rawMatches.find((v) => isMatchingTjVersion(v, selectedAnnouncement.relatedLegalActId));
+	const validMatches = rawMatches
+		.filter((v) => isMatchingTjVersion(v, selectedAnnouncement.relatedLegalActId))
+		.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+	const validMatch = validMatches[0];
 
 	if (rawMatches.length > 0 && !validMatch) {
 		return outcome(legalAct.id, "excluded", "metadata_incomplete", null, {
@@ -260,6 +280,10 @@ export function evaluateCurrentLawCandidate(
 		announcementChain: resolvedChain.map((c) => c.relatedSourceId),
 		selectedAnnouncementLegalActId: selectedAnnouncement.relatedLegalActId,
 		selectedVersionId: selectedVersion.id,
+		// Auditability: how many immutable content revisions existed for this announcement, and
+		// which one (the most recently created) was actually selected — never silent when more
+		// than one parser output ever existed for the same official text.
+		contentRevisionCandidateCount: validMatches.length,
 		amendmentChecks,
 		amendmentRelationsSource: "announcement",
 		correctionTkRelationsSource: "base_act_and_announcement",

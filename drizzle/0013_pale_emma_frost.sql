@@ -1,0 +1,2 @@
+DROP INDEX "legal_act_versions_source_announcement_uidx";--> statement-breakpoint
+CREATE UNIQUE INDEX "legal_act_versions_source_announcement_content_uidx" ON "legal_act_versions" USING btree ("legal_act_id","source_announcement_legal_act_id","content_hash") WHERE "legal_act_versions"."source_announcement_legal_act_id" IS NOT NULL;

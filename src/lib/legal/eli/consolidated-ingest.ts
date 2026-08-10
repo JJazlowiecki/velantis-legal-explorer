@@ -4,6 +4,7 @@ import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import * as schema from "../../../db/schema";
 import { legalActVersions, legalActs } from "../../../db/schema";
 import { fetchEliActMetadata, fetchEliActReferences } from "./client";
+import { computeParsedContentHash } from "./content-hash";
 import { mapEliMetadataToLegalAct } from "./ingest";
 import { replaceProvisionsForVersion, StructureIngestError } from "./structure-ingest";
 import { parseActStructureHtml } from "./structure";
@@ -86,14 +87,20 @@ async function findOrInsertLegalAct(db: Db, metadata: EliActMetadata): Promise<{
 }
 
 /**
- * Ingests ONE immutable, announcement-backed consolidated (tj) version of a base statute.
+ * Ingests ONE immutable, announcement-backed, content-addressed consolidated (tj) revision of a
+ * base statute.
  *
  * This is the ONLY place a `legal_act_versions` row with `sourceAnnouncementLegalActId` set is
- * ever created. Re-running with the SAME announcement is idempotent (finds the existing version
- * by (baseActId, announcementActId) and re-runs the same shrink-guarded provision replace as
- * `ingestActStructure`); running with a DIFFERENT announcement for the same base act always
- * creates a NEW version row — the previous announcement's version, provisions, and id are never
- * touched (see current-law-corpus Phase 1 design: immutability is the whole point).
+ * ever created. A version's real identity is the TRIPLE (baseActId, announcementActId,
+ * contentHash) — see content-hash.ts: re-running with the SAME announcement and PARSER OUTPUT
+ * THAT PARSES TO THE SAME CONTENT is idempotent (finds and reuses the existing row, touching
+ * nothing); re-running with the SAME announcement but DIFFERENT parsed content (e.g. a parser
+ * bug fix recovering previously-lost text) creates a NEW, separate version row — the old row,
+ * its provisions, and every completed corpus run / History entry / cache row already pointing at
+ * it are never mutated or deleted. A different announcement for the same base act always creates
+ * a new version row too, as before (see current-law-corpus Phase 1 design: immutability is the
+ * whole point — this extends it from "per announcement" to "per announcement AND per parsed
+ * content revision").
  *
  * Provenance is verified, not assumed: both the base act's "Inf. o tekście jednolitym" relation
  * and the announcement's "Tekst jednolity dla aktu" back-reference must agree before anything is
@@ -152,7 +159,23 @@ export async function ingestOfficialConsolidatedStructure(
 
   const announcementAct = await findOrInsertLegalAct(input.db, announcementMetadata);
 
-  // Step 5: find-or-create the IMMUTABLE base-act version for THIS SPECIFIC announcement.
+  // Steps 5-6: fetch the announcement's HTML, extract ONLY the semantic consolidated-statute
+  // annex (never the announcement's own administrative preamble — parseActStructureHtml throws a
+  // typed AnnexSelectionError if the boundary can't be determined unambiguously), and fingerprint
+  // the resulting PARSED CONTENT. This must happen BEFORE any version-row decision: the content
+  // hash, not just (baseAct, announcement), is now part of a version's real identity — two
+  // parses of the SAME announcement that disagree on structure/text (e.g. a parser bug fix) are
+  // two DIFFERENT immutable revisions, never one row silently replaced in place.
+  const html = await fetchHtml(announcementCoords);
+  const parsed = parseActStructureHtml(html, "consolidated_annex");
+  const contentHash = computeParsedContentHash(parsed);
+
+  // Step 7: find-or-create the IMMUTABLE base-act version for THIS EXACT (announcement, content)
+  // pair. Same announcement + same hash => idempotently reuse the existing row untouched (no
+  // re-insert at all — its provisions are guaranteed identical by construction). Same
+  // announcement + a DIFFERENT hash (e.g. corrected parser output) => a brand-new version row,
+  // never a destructive replace of the old one — the old row, its provisions, and every
+  // completed corpus run / History entry / cache row that already points at it remain untouched.
   const [existingVersion] = await input.db
     .select({ id: legalActVersions.id })
     .from(legalActVersions)
@@ -160,45 +183,48 @@ export async function ingestOfficialConsolidatedStructure(
       and(
         eq(legalActVersions.legalActId, baseAct.id),
         eq(legalActVersions.sourceAnnouncementLegalActId, announcementAct.id),
+        eq(legalActVersions.contentHash, contentHash),
       ),
     )
     .limit(1);
 
-  let legalActVersionId: string;
-  let versionAction: "inserted" | "reused";
-
   if (existingVersion) {
-    legalActVersionId = existingVersion.id;
-    versionAction = "reused";
-  } else {
-    const [inserted] = await input.db
-      .insert(legalActVersions)
-      .values({
-        legalActId: baseAct.id,
-        versionKind: "consolidated",
-        sourceExpressionId: "tj",
-        sourceAnnouncementLegalActId: announcementAct.id,
-        authorityClass: "authoritative",
-        nonAuthoritative: false,
-        currentnessStatus: "unproven",
-        legalStateDate: announcementMetadata.legalStatusDate ?? null,
-        sourceDocumentKey: `announcement:${input.announcementActSourceId}`,
-        sourceHtmlUrl: `https://api.sejm.gov.pl/eli/acts/${announcementCoords.publisher}/${announcementCoords.year}/${announcementCoords.position}/text.html`,
-        isCurrent: false,
-      })
-      .returning({ id: legalActVersions.id });
-    legalActVersionId = inserted.id;
-    versionAction = "inserted";
+    return {
+      baseLegalActId: baseAct.id,
+      announcementLegalActId: announcementAct.id,
+      legalActVersionId: existingVersion.id,
+      versionAction: "reused",
+      deletedCount: 0,
+      insertedCount: 0,
+    };
   }
 
-  // Steps 6-7: fetch the announcement's HTML and extract ONLY the semantic consolidated-statute
-  // annex (never the announcement's own administrative preamble) — parseActStructureHtml throws
-  // a typed AnnexSelectionError if the boundary can't be determined unambiguously.
-  const html = await fetchHtml(announcementCoords);
-  const parsed = parseActStructureHtml(html, "consolidated_annex");
+  const [inserted] = await input.db
+    .insert(legalActVersions)
+    .values({
+      legalActId: baseAct.id,
+      versionKind: "consolidated",
+      sourceExpressionId: "tj",
+      sourceAnnouncementLegalActId: announcementAct.id,
+      authorityClass: "authoritative",
+      nonAuthoritative: false,
+      currentnessStatus: "unproven",
+      legalStateDate: announcementMetadata.legalStatusDate ?? null,
+      contentHash,
+      // Content-hash-qualified: distinct parsed revisions of the same announcement must never
+      // collide on legal_act_versions_source_document_uidx (legalActId, sourceDocumentKey).
+      sourceDocumentKey: `announcement:${input.announcementActSourceId}:${contentHash}`,
+      sourceHtmlUrl: `https://api.sejm.gov.pl/eli/acts/${announcementCoords.publisher}/${announcementCoords.year}/${announcementCoords.position}/text.html`,
+      isCurrent: false,
+    })
+    .returning({ id: legalActVersions.id });
+  const legalActVersionId = inserted.id;
 
-  // Step 8: ingest provisions into that EXACT immutable version — shrink-guarded, full-replace,
-  // idempotent on re-run, and by construction (lookup above) never touches a sibling version.
+  // Step 8: populate the brand-new (guaranteed-empty) revision's provisions. Reuses the existing
+  // transactional delete+insert core unchanged — for a freshly inserted version id the "delete"
+  // step is a genuine no-op (existingCount is provably 0), so this is exactly a transactional
+  // creation of the new revision, never a replacement of anything another run/entry/cache row
+  // could already be pointing at.
   const { deletedCount, insertedCount } = await replaceProvisionsForVersion({
     db: input.db,
     legalActVersionId,
@@ -210,7 +236,7 @@ export async function ingestOfficialConsolidatedStructure(
     baseLegalActId: baseAct.id,
     announcementLegalActId: announcementAct.id,
     legalActVersionId,
-    versionAction,
+    versionAction: "inserted",
     deletedCount,
     insertedCount,
   };

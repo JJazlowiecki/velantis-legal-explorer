@@ -280,6 +280,46 @@ describeDatabase("generateCurrentLawCorpus", () => {
 			generateCurrentLawCorpus({ db, effectiveAsOf: "2020-01-01", scope: [], now: NOW }),
 		).rejects.toThrow(/only supports generating a corpus for the current date/);
 	});
+
+	it("G/H: a completed run keeps resolving its OLD content revision; a NEW run generated after a corrected re-parse (new version row, same announcement) selects the NEW revision, and the old run/entries are never mutated", async () => {
+		if (!db) throw new Error("unreachable");
+		const base = await insertAct(`${TEST_PREFIX}revision`);
+		const announcement = await insertAct(`${TEST_PREFIX}revision-announcement`, { promulgationDate: "2024-01-01" });
+		await insertRelation(base.id, "consolidated_text_announcement", announcement.sourceId, announcement.id);
+
+		// The "old, buggy parser" revision — this is what a completed run was generated against.
+		const oldRevision = await insertVersion(base.id, {
+			sourceAnnouncementLegalActId: announcement.id,
+		});
+		await insertSearchableProvision(oldRevision.id, "art. 1", true);
+
+		const scope = [{ sourceId: base.sourceId, label: "revision" }];
+		const oldRun = await generateCurrentLawCorpus({ db, effectiveAsOf: EFFECTIVE_AS_OF, scope, now: NOW });
+		expect(oldRun.included).toEqual([{ legalActId: base.id, legalActVersionId: oldRevision.id, runtimeReady: true }]);
+		const oldRunSnapshot = await getCurrentLawCorpusRun({ db, runId: oldRun.runId });
+
+		// Simulate the parser fix producing a NEW, separate immutable revision for the SAME
+		// announcement (as consolidated-ingest.ts now does) — never touching oldRevision's row.
+		const newRevision = await insertVersion(base.id, {
+			sourceAnnouncementLegalActId: announcement.id,
+		});
+		await insertSearchableProvision(newRevision.id, "art. 1", true);
+		await insertSearchableProvision(newRevision.id, "art. 1 ust. 1", true); // the recovered ustęp
+
+		const newRun = await generateCurrentLawCorpus({ db, effectiveAsOf: EFFECTIVE_AS_OF, scope, now: NOW });
+		expect(newRun.included).toEqual([{ legalActId: base.id, legalActVersionId: newRevision.id, runtimeReady: true }]);
+		expect(newRun.runId).not.toBe(oldRun.runId);
+		expect(newRun.selectionHash).not.toBe(oldRun.selectionHash); // differs: legalActVersionId is part of the hashed entry
+
+		// The OLD run is byte-for-byte unchanged after the new run was generated.
+		const oldRunSnapshotAfter = await getCurrentLawCorpusRun({ db, runId: oldRun.runId });
+		expect(oldRunSnapshotAfter).toEqual(oldRunSnapshot);
+		expect(oldRunSnapshotAfter?.entries.find((e) => e.legalActId === base.id)?.legalActVersionId).toBe(oldRevision.id);
+
+		// The OLD revision's own provisions are also untouched (still exactly 1, not 2).
+		const oldProvisions = await db.select().from(legalProvisions).where(eq(legalProvisions.legalActVersionId, oldRevision.id));
+		expect(oldProvisions).toHaveLength(1);
+	});
 });
 
 describeDatabase("getLatestUsableCurrentLawCorpus (admin helper)", () => {

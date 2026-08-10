@@ -80,6 +80,7 @@ async function loadCandidateInput(
 			sourceAnnouncementLegalActId: legalActVersions.sourceAnnouncementLegalActId,
 			authorityClass: legalActVersions.authorityClass,
 			legalStateDate: legalActVersions.legalStateDate,
+			createdAt: legalActVersions.createdAt,
 		})
 		.from(legalActVersions)
 		.where(eq(legalActVersions.legalActId, legalAct.id));
@@ -95,7 +96,11 @@ async function loadCandidateInput(
 		);
 	const hasStructureByVersion = new Set(provisionCounts.map((p) => p.legalActVersionId));
 
-	const versions = versionRows.map((v) => ({ ...v, hasStructure: hasStructureByVersion.has(v.id) }));
+	const versions = versionRows.map((v) => ({
+		...v,
+		hasStructure: hasStructureByVersion.has(v.id),
+		createdAt: v.createdAt.toISOString(),
+	}));
 
 	const baseRelations = await db
 		.select({
