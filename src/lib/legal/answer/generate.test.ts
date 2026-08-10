@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { FinalAnswerGenerationError, generateFinalAnswer } from "./generate";
+import { FinalAnswerGenerationError, formatSourceForPrompt, generateFinalAnswer } from "./generate";
 import type { PackedSource } from "./packing";
 
 function chatResponse(status: number, body: unknown): Response {
@@ -241,5 +241,59 @@ describe("FinalAnswerGenerationError", () => {
     expect(error.code).toBe("HTTP_ERROR");
     expect(error.status).toBe(500);
     expect(error.name).toBe("FinalAnswerGenerationError");
+  });
+});
+
+describe("formatSourceForPrompt currentness representation", () => {
+  it("A: a run-scoped proven-current source is presented with its exact proof date and no generic 'unproven' text", () => {
+    const provenSource: PackedSource = { ...source, currentnessStatus: "unproven", provenCurrentAsOf: "2026-08-09" };
+    const formatted = formatSourceForPrompt(provenSource);
+
+    expect(formatted).toContain("aktualność potwierdzona na dzień 2026-08-09");
+    expect(formatted).not.toContain("aktualność: unproven");
+  });
+
+  it("B: a source with no run-scoped proof keeps the existing conservative 'unproven' representation", () => {
+    const unprovenSource: PackedSource = { ...source, currentnessStatus: "unproven", provenCurrentAsOf: null };
+    const formatted = formatSourceForPrompt(unprovenSource);
+
+    expect(formatted).toContain("aktualność: unproven");
+    expect(formatted).not.toContain("aktualność potwierdzona");
+  });
+
+  it("C: the immutable currentnessStatus field never overrides run-scoped proof when both are present", () => {
+    // currentnessStatus stays "unproven" by design even for a proven-current source (it is
+    // never mutated anywhere) — provenCurrentAsOf alone must decide the prompt representation.
+    const provenSource: PackedSource = { ...source, currentnessStatus: "unproven", provenCurrentAsOf: "2026-08-09" };
+    const formatted = formatSourceForPrompt(provenSource);
+
+    expect(formatted).toContain("aktualność potwierdzona na dzień 2026-08-09");
+  });
+
+  it("D: the proof date is bounded — never rendered as unconditionally/forever current or as a different date", () => {
+    const provenSource: PackedSource = { ...source, provenCurrentAsOf: "2026-08-09" };
+    const formatted = formatSourceForPrompt(provenSource);
+
+    expect(formatted).toContain("2026-08-09");
+    expect(formatted).not.toMatch(/obowiązując[ay] (bezterminowo|zawsze|na zawsze)/i);
+    expect(formatted).not.toContain("2026-01-01");
+    expect(formatted).not.toContain("2027-08-09");
+  });
+
+  it("end-to-end: generateFinalAnswer sends the proven-current representation to the model, not the raw currentnessStatus", async () => {
+    const provenSource: PackedSource = { ...source, currentnessStatus: "unproven", provenCurrentAsOf: "2026-08-09" };
+    const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
+    await generateFinalAnswer({ ...baseInput, sources: [provenSource] }, { apiKey: "test-key", fetchImpl });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    const userMessage = body.messages.find((m: { role: string }) => m.role === "user").content as string;
+    const sourcesSection = userMessage.slice(userMessage.indexOf("ŹRÓDŁA:"));
+
+    // Only the ŹRÓDŁA: section is asserted here — the system prompt's own instructional text
+    // legitimately mentions the literal string "aktualność: unproven" generically (to explain
+    // the unproven case), which is irrelevant to what THIS source's own metadata line says.
+    expect(sourcesSection).toContain("aktualność potwierdzona na dzień 2026-08-09");
+    expect(sourcesSection).not.toContain("aktualność: unproven");
   });
 });

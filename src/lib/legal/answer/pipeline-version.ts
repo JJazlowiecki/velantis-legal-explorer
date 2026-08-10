@@ -8,4 +8,4 @@
  * Deliberately a hand-maintained string, never derived from a timestamp or build hash, so a
  * bump is always an explicit, reviewable decision.
  */
-export const LEGAL_ANSWER_PIPELINE_VERSION = "legal-answer-v2";
+export const LEGAL_ANSWER_PIPELINE_VERSION = "legal-answer-v3";
