@@ -119,6 +119,43 @@ function toResourceSummary(row: typeof legalActResources.$inferSelect): LegalAct
   };
 }
 
+/**
+ * A parser content revision (see content-hash.ts / consolidated-ingest.ts) is technical
+ * ingestion provenance, never a new legal promulgation — the public Legal Acts browser must
+ * never show two rows for the SAME official announcement merely because it was parsed twice
+ * (once with a bug, once corrected). Collapses `legal_act_versions` rows down to exactly one per
+ * distinct `sourceAnnouncementLegalActId`, keeping the most recently created (i.e. current-best)
+ * content revision; rows with `sourceAnnouncementLegalActId === null` (ogl/uj/legacy) are never
+ * touched — they were already unique per (act, expression) before this concept existed.
+ */
+export function dedupeToLatestContentRevisionPerAnnouncement<
+  T extends { id: string; sourceAnnouncementLegalActId: string | null; createdAt: Date },
+>(versions: T[]): T[] {
+  const latestByAnnouncement = new Map<string, T>();
+  const result: T[] = [];
+
+  for (const version of versions) {
+    if (version.sourceAnnouncementLegalActId === null) {
+      result.push(version);
+      continue;
+    }
+
+    const existing = latestByAnnouncement.get(version.sourceAnnouncementLegalActId);
+    if (!existing) {
+      latestByAnnouncement.set(version.sourceAnnouncementLegalActId, version);
+      continue;
+    }
+    const isNewer =
+      version.createdAt.getTime() > existing.createdAt.getTime() ||
+      (version.createdAt.getTime() === existing.createdAt.getTime() && version.id > existing.id);
+    if (isNewer) {
+      latestByAnnouncement.set(version.sourceAnnouncementLegalActId, version);
+    }
+  }
+
+  return [...result, ...latestByAnnouncement.values()];
+}
+
 /** Single query, keyed by legalActVersionId — avoids one count query per version (N+1). */
 async function countProvisionsByVersion(db: Db, versionIds: string[]): Promise<Map<string, number>> {
   if (versionIds.length === 0) {
@@ -226,7 +263,8 @@ export async function listLegalActs(input: ListLegalActsInput): Promise<LegalAct
   }
 
   const actIds = acts.map((act) => act.id);
-  const versions = await input.db.select().from(legalActVersions).where(inArray(legalActVersions.legalActId, actIds));
+  const rawVersions = await input.db.select().from(legalActVersions).where(inArray(legalActVersions.legalActId, actIds));
+  const versions = dedupeToLatestContentRevisionPerAnnouncement(rawVersions);
   const structureCounts = await countProvisionsByVersion(
     input.db,
     versions.map((v) => v.id),
@@ -315,11 +353,12 @@ export async function getLegalAct(input: GetLegalActInput): Promise<LegalActDeta
     return null;
   }
 
-  const versions = await input.db
+  const rawVersions = await input.db
     .select()
     .from(legalActVersions)
     .where(eq(legalActVersions.legalActId, input.id))
     .orderBy(asc(legalActVersions.sourceExpressionId));
+  const versions = dedupeToLatestContentRevisionPerAnnouncement(rawVersions);
 
   const resources = await input.db.select().from(legalActResources).where(eq(legalActResources.legalActId, input.id));
   const structureCounts = await countProvisionsByVersion(

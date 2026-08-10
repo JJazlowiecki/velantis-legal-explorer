@@ -32,6 +32,7 @@ function tjVersion(overrides: Partial<CurrentLawVersionInput> & { id: string }):
 		authorityClass: "authoritative",
 		hasStructure: true,
 		legalStateDate: null,
+		createdAt: "2024-01-01T00:00:00.000Z",
 		...overrides,
 	};
 }
@@ -334,5 +335,63 @@ describe("evaluateCurrentLawCandidate — Model A (pl-current-law-v1)", () => {
 			legalActVersionId: "v-new",
 		});
 		expect(result.evidence).toMatchObject({ selectedAnnouncementLegalActId: ANNOUNCEMENT_NEW_ID, selectedVersionId: "v-new" });
+	});
+
+	it("H: when multiple immutable content revisions exist for the SAME announcement (a parser fix produced a corrected re-parse), deterministically selects the MOST RECENTLY CREATED one — never the first in array order", () => {
+		const result = evaluateCurrentLawCandidate(
+			input({
+				baseActiveRelations: [announcementChainRelation(ANNOUNCEMENT_NEW_ID, "DU/2024/1")],
+				relatedActsById: new Map([[ANNOUNCEMENT_NEW_ID, relatedAct({ promulgationDate: "2024-01-01" })]]),
+				versions: [
+					// Deliberately listed newest-first to prove selection isn't "just take versions[0]".
+					tjVersion({
+						id: "v-corrected",
+						sourceAnnouncementLegalActId: ANNOUNCEMENT_NEW_ID,
+						createdAt: "2026-08-10T00:00:00.000Z",
+					}),
+					tjVersion({
+						id: "v-old-parser-bug",
+						sourceAnnouncementLegalActId: ANNOUNCEMENT_NEW_ID,
+						createdAt: "2024-01-01T00:00:00.000Z",
+					}),
+				],
+			}),
+			EFFECTIVE_AS_OF,
+		);
+		expect(result.decision).toBe("included");
+		expect(result.legalActVersionId).toBe("v-corrected");
+		expect(result.evidence).toMatchObject({ contentRevisionCandidateCount: 2 });
+	});
+
+	it("a stale content revision that lacks structure is skipped in favor of an older-but-structured one for the SAME announcement", () => {
+		const result = evaluateCurrentLawCandidate(
+			input({
+				baseActiveRelations: [announcementChainRelation(ANNOUNCEMENT_NEW_ID, "DU/2024/1")],
+				relatedActsById: new Map([[ANNOUNCEMENT_NEW_ID, relatedAct({ promulgationDate: "2024-01-01" })]]),
+				versions: [
+					tjVersion({
+						id: "v-newer-but-unindexed",
+						sourceAnnouncementLegalActId: ANNOUNCEMENT_NEW_ID,
+						createdAt: "2026-08-10T00:00:00.000Z",
+						hasStructure: false,
+					}),
+					tjVersion({
+						id: "v-older-structured",
+						sourceAnnouncementLegalActId: ANNOUNCEMENT_NEW_ID,
+						createdAt: "2024-01-01T00:00:00.000Z",
+						hasStructure: true,
+					}),
+				],
+			}),
+			EFFECTIVE_AS_OF,
+		);
+		// isMatchingTjVersion doesn't check hasStructure — both are "valid" matches; hasStructure
+		// is only checked on the eventually-chosen one. Documents the exact current fail-closed
+		// behavior: the newest-created candidate wins the tie-break even if unstructured, and
+		// THAT one then fails latest_tj_content_unavailable — it does not fall back to the older,
+		// structured revision (matching the KC "never let an older successful parse rescue a
+		// newer failed one" precedent already established for cross-announcement selection).
+		expect(result.decision).toBe("excluded");
+		expect(result.reasonCode).toBe("latest_tj_content_unavailable");
 	});
 });

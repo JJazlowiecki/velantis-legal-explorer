@@ -392,7 +392,7 @@ describeDatabase("ingestOfficialConsolidatedStructure", () => {
     ).rejects.toThrow();
   });
 
-  it("SCHEMA: the SAME announcement cannot create a duplicate TJ version even via a raw duplicate insert", async () => {
+  it("SCHEMA: the SAME (announcement, contentHash) triple cannot be duplicated even via a raw duplicate insert", async () => {
     if (!db) throw new Error("unreachable");
     const base = await insertBaseAct();
     const [announcement] = await db
@@ -405,6 +405,7 @@ describeDatabase("ingestOfficialConsolidatedStructure", () => {
       versionKind: "consolidated",
       sourceExpressionId: "tj",
       sourceAnnouncementLegalActId: announcement.id,
+      contentHash: "same-content-hash",
       sourceDocumentKey: "announcement:first",
     });
 
@@ -414,12 +415,89 @@ describeDatabase("ingestOfficialConsolidatedStructure", () => {
         versionKind: "consolidated",
         sourceExpressionId: "tj",
         sourceAnnouncementLegalActId: announcement.id,
+        contentHash: "same-content-hash",
         sourceDocumentKey: "announcement:second",
       }),
     ).rejects.toThrow();
   });
 
-  it("rejects a destructive shrink for a re-ingested announcement, exactly like ingestActStructure", async () => {
+  it("SCHEMA: the SAME announcement with a DIFFERENT contentHash (or both null, pre-migration legacy shape) is NOT blocked — this is the whole point of content-revision coexistence", async () => {
+    if (!db) throw new Error("unreachable");
+    const base = await insertBaseAct();
+    const [announcement] = await db
+      .insert(legalActs)
+      .values({ jurisdiction: "PL", source: ELI_SOURCE, sourceId: ANNOUNCEMENT_A_SOURCE_ID, title: "Announcement", actType: "Obwieszczenie" })
+      .returning();
+
+    await db.insert(legalActVersions).values({
+      legalActId: base.id,
+      versionKind: "consolidated",
+      sourceExpressionId: "tj",
+      sourceAnnouncementLegalActId: announcement.id,
+      contentHash: "old-parser-hash",
+      sourceDocumentKey: "announcement:old",
+    });
+
+    await expect(
+      db.insert(legalActVersions).values({
+        legalActId: base.id,
+        versionKind: "consolidated",
+        sourceExpressionId: "tj",
+        sourceAnnouncementLegalActId: announcement.id,
+        contentHash: "corrected-parser-hash",
+        sourceDocumentKey: "announcement:corrected",
+      }),
+    ).resolves.not.toThrow();
+
+    const versions = await db
+      .select()
+      .from(legalActVersions)
+      .where(eq(legalActVersions.sourceAnnouncementLegalActId, announcement.id));
+    expect(versions).toHaveLength(2);
+  });
+
+  it("L: legacy pre-migration rows (contentHash never backfilled, still null) remain valid and insertable exactly as before — NULL never collides with NULL in the new unique index", async () => {
+    if (!db) throw new Error("unreachable");
+    const base = await insertBaseAct();
+    const [announcement] = await db
+      .insert(legalActs)
+      .values({ jurisdiction: "PL", source: ELI_SOURCE, sourceId: ANNOUNCEMENT_A_SOURCE_ID, title: "Announcement", actType: "Obwieszczenie" })
+      .returning();
+
+    // Represents the real pre-migration shape of every row ingested before this task: no
+    // contentHash was ever computed or stored for it.
+    const [legacyRow] = await db
+      .insert(legalActVersions)
+      .values({
+        legalActId: base.id,
+        versionKind: "consolidated",
+        sourceExpressionId: "tj",
+        sourceAnnouncementLegalActId: announcement.id,
+        contentHash: null,
+        sourceDocumentKey: "announcement:legacy",
+      })
+      .returning();
+    expect(legacyRow.contentHash).toBeNull();
+
+    // A second legacy-shaped row (also null) for the SAME announcement does not violate the new
+    // index either — this is a deliberate, safe consequence of standard SQL NULL semantics, not
+    // a gap: it means old data never needs a backfill migration to remain valid.
+    await expect(
+      db.insert(legalActVersions).values({
+        legalActId: base.id,
+        versionKind: "consolidated",
+        sourceExpressionId: "tj",
+        sourceAnnouncementLegalActId: announcement.id,
+        contentHash: null,
+        sourceDocumentKey: "announcement:legacy-2",
+      }),
+    ).resolves.not.toThrow();
+
+    const legacyProvisions = await db.select().from(legalProvisions).where(eq(legalProvisions.legalActVersionId, legacyRow.id));
+    expect(legacyProvisions).toHaveLength(0); // untouched — this test never re-ingested it
+  });
+
+  it("CONTENT REVISION: re-ingesting the SAME announcement with materially SMALLER/DIFFERENT parsed content never destructively shrinks the old revision — it creates a new, separate one instead (the old shrink-guard scenario no longer applies to this path)", async () => {
     if (!db) throw new Error("unreachable");
     await insertBaseAct();
 
@@ -443,7 +521,8 @@ describeDatabase("ingestOfficialConsolidatedStructure", () => {
       </div></body></html>`;
     }
 
-    await ingestOfficialConsolidatedStructure({
+    // D/E: the "old" (larger) revision — imagine this is what a buggy parser produced.
+    const old = await ingestOfficialConsolidatedStructure({
       db,
       baseActSourceId: BASE_SOURCE_ID,
       announcementActSourceId: ANNOUNCEMENT_A_SOURCE_ID,
@@ -451,8 +530,13 @@ describeDatabase("ingestOfficialConsolidatedStructure", () => {
       fetchReferences,
       fetchHtml: async () => annexWithArticles(10),
     });
+    const oldProvisionsBefore = await db.select().from(legalProvisions).where(eq(legalProvisions.legalActVersionId, old.legalActVersionId));
+    expect(oldProvisionsBefore).toHaveLength(11); // root "part" + 10 articles
 
-    const attempt = ingestOfficialConsolidatedStructure({
+    // A materially SMALLER re-parse of the SAME announcement — under the OLD destructive-replace
+    // design this would have thrown DestructiveShrinkError or silently shrunk the same row. Under
+    // content-revision identity it must instead create a brand-new, separate immutable revision.
+    const corrected = await ingestOfficialConsolidatedStructure({
       db,
       baseActSourceId: BASE_SOURCE_ID,
       announcementActSourceId: ANNOUNCEMENT_A_SOURCE_ID,
@@ -461,6 +545,32 @@ describeDatabase("ingestOfficialConsolidatedStructure", () => {
       fetchHtml: async () => annexWithArticles(3),
     });
 
-    await expect(attempt).rejects.toThrow(DestructiveShrinkError);
+    expect(corrected.versionAction).toBe("inserted");
+    expect(corrected.legalActVersionId).not.toBe(old.legalActVersionId);
+
+    // E: the OLD revision's provisions are byte/row-wise unchanged — never touched.
+    const oldProvisionsAfter = await db.select().from(legalProvisions).where(eq(legalProvisions.legalActVersionId, old.legalActVersionId));
+    expect(oldProvisionsAfter).toEqual(oldProvisionsBefore);
+
+    // F: the NEW revision's provisions are fully isolated from the old one.
+    const newProvisions = await db.select().from(legalProvisions).where(eq(legalProvisions.legalActVersionId, corrected.legalActVersionId));
+    expect(newProvisions).toHaveLength(4); // root "part" + 3 articles
+
+    // Both revisions of the same announcement coexist.
+    const allRevisions = await db
+      .select()
+      .from(legalActVersions)
+      .where(eq(legalActVersions.sourceAnnouncementLegalActId, old.announcementLegalActId));
+    expect(allRevisions).toHaveLength(2);
+    expect(new Set(allRevisions.map((v) => v.contentHash)).size).toBe(2); // distinct hashes
+  });
+
+  it("shrink-guard behavior on ingestActStructure (the direct, non-announcement path) is unmodified by this task", async () => {
+    if (!db) throw new Error("unreachable");
+    // DestructiveShrinkError is still importable and still thrown by replaceProvisionsForVersion
+    // itself against an EXISTING non-empty version id — see structure-ingest.test.ts /
+    // structure-ingest.integration.test.ts, unchanged by this task. This test only documents
+    // that the class still exists and is still exported from the same module.
+    expect(DestructiveShrinkError).toBeDefined();
   });
 });

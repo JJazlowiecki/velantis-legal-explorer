@@ -77,6 +77,16 @@ export const legalActVersions = pgTable(
 		sourceDocumentKey: text("source_document_key").notNull(),
 		sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }),
 		fetchedAt: timestamp("fetched_at", { withTimezone: true }).defaultNow().notNull(),
+		/**
+		 * SHA-256 of the deterministic canonical serialization of this version's PARSED provision
+		 * structure (see content-hash.ts) — set only by the announcement-backed consolidated
+		 * structure pipeline (consolidated-ingest.ts); null for ogl/uj/metadata-only rows and for
+		 * legacy rows ingested before this field existed. This is the real content-revision
+		 * identity that makes a `legal_act_versions` row immutable in practice: two parses of the
+		 * SAME official announcement that disagree on this hash are two DIFFERENT rows (see
+		 * legal_act_versions_source_announcement_content_uidx below), never one row silently
+		 * replaced in place.
+		 */
 		contentHash: text("content_hash"),
 		sourceHtmlUrl: text("source_html_url"),
 		sourcePdfUrl: text("source_pdf_url"),
@@ -99,11 +109,16 @@ export const legalActVersions = pgTable(
 		uniqueIndex("legal_act_versions_source_expression_uidx")
 			.on(table.legalActId, table.sourceExpressionId)
 			.where(sql`${table.sourceAnnouncementLegalActId} IS NULL`),
-		// Announcement-backed versions: at most one version per (base act, announcement) — makes
-		// re-ingesting the SAME announcement idempotent while still allowing one new immutable
-		// version per DISTINCT announcement.
-		uniqueIndex("legal_act_versions_source_announcement_uidx")
-			.on(table.legalActId, table.sourceAnnouncementLegalActId)
+		// Announcement-backed versions: at most one version per (base act, announcement, PARSED
+		// CONTENT). `contentHash` (see content-hash.ts) is the parser-output fingerprint — this
+		// is deliberately NOT a singleton-per-announcement constraint: a corrected parser run
+		// against the SAME official announcement produces a DIFFERENT contentHash, and must be
+		// able to coexist as its own new immutable legal_act_versions row rather than colliding
+		// with (and forcing a destructive replace of) an already-referenced old parse. Re-running
+		// ingestion with UNCHANGED parser output against the SAME announcement still converges on
+		// the SAME row (idempotent), since the triple is then identical.
+		uniqueIndex("legal_act_versions_source_announcement_content_uidx")
+			.on(table.legalActId, table.sourceAnnouncementLegalActId, table.contentHash)
 			.where(sql`${table.sourceAnnouncementLegalActId} IS NOT NULL`),
 		uniqueIndex("legal_act_versions_source_document_uidx").on(
 			table.legalActId,
