@@ -156,6 +156,160 @@ describe("parseActStructureHtml", () => {
     expect(letter).toMatchObject({ citationLabel: "art. 3 § 1 pkt 2 lit. a", text: "a) litera a,", parentId: point2?.id });
   });
 
+  it("A: parses a simple numbered ustęp (unit_pass) with no nested pkt/lit, preserving its own text instead of producing a false zero-child article stub", () => {
+    // Exact shape confirmed live against the official announcement HTML actually ingested for
+    // DU/2001/1402 art. 6 (see the ingestion-completeness-audit report): the operative text
+    // lives one level deeper than the article, inside an intermediate unit_pass node.
+    const html = wrapDocument(`
+      <div class="unit unit_arti pro-text false" id="arti_6" data-id="arti_6">
+        <h3 CLASS="pro-none"><B CLASS="b">Art.&nbsp;6.</B></h3>
+        <div class="unit-inner">
+          <div class="unit unit_pass pro-text false" id="arti_6-pass_1" data-id="pass_1">
+            <h3 CLASS="pro-align-padding-right">1.</h3>
+            <div class="unit-inner">
+              <div data-template="xText" CLASS="pro-text">Producentowi bazy danych przysługuje wyłączne i zbywalne prawo pobierania danych.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+    const result = parseActStructureHtml(html);
+
+    const article = result.find((n) => n.provisionType === "article");
+    const clause = result.find((n) => n.provisionType === "clause");
+
+    // The article no longer silently swallows its only ustęp's text nor becomes a bare stub.
+    expect(article?.text).toBe("Art. 6.");
+    expect(clause).toBeDefined();
+    expect(clause).toMatchObject({
+      citationLabel: "art. 6 ust. 1",
+      heading: "1.",
+      text: "1. Producentowi bazy danych przysługuje wyłączne i zbywalne prawo pobierania danych.",
+      paragraph: "1",
+      article: null,
+      parentId: article?.id,
+    });
+  });
+
+  it("A2: a clause's substantive text is never lost, distinguishing it from a real heading-only container", () => {
+    const html = wrapDocument(`
+      <div class="unit unit_arti pro-text false" id="arti_6" data-id="arti_6">
+        <h3 CLASS="pro-none"><B CLASS="b">Art.&nbsp;6.</B></h3>
+        <div class="unit-inner">
+          <div class="unit unit_pass pro-text false" id="arti_6-pass_1" data-id="pass_1">
+            <h3 CLASS="pro-align-padding-right">1.</h3>
+            <div class="unit-inner">
+              <div data-template="xText" CLASS="pro-text">Treść ustępu.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+    const result = parseActStructureHtml(html);
+    const clause = result.find((n) => n.provisionType === "clause");
+    // Not a heading-duplicate: text carries real content beyond "1." — this is what makes
+    // isSearchableProvision (documents.ts) correctly index it, unlike a genuinely bare stub.
+    expect(clause?.text).not.toBe(clause?.heading);
+  });
+
+  it("B: parses a nested ustęp (unit_pass with its own text AND nested pkt/lit children) without losing either", () => {
+    // Exact shape confirmed live for DU/1997/681 art. 24a: an ustęp with its own introductory
+    // sentence AND (in other real articles of the same act) further enumerated points beneath it.
+    const html = wrapDocument(`
+      <div class="unit unit_arti pro-text false" id="arti_24a" data-id="arti_24a">
+        <h3 CLASS="pro-none"><B CLASS="b">Art.&nbsp;24a.</B></h3>
+        <div class="unit-inner">
+          <div class="unit unit_pass pro-text false" id="arti_24a-pass_1" data-id="pass_1">
+            <h3 CLASS="pro-align-padding-right">1.</h3>
+            <div class="unit-inner">
+              <div data-template="xText" CLASS="pro-text">Jednostki są obowiązane stosować wymagania:</div>
+              <div class="unit unit_pint pro-text false" id="arti_24a-pass_1-pint_1" data-id="pint_1">
+                <h3 CLASS="pro-align-padding-right">1)</h3>
+                <div class="unit-inner">
+                  <div data-template="xText" CLASS="pro-text">dobrej praktyki pobierania krwi,</div>
+                </div>
+              </div>
+              <div class="unit unit_pint pro-text false" id="arti_24a-pass_1-pint_2" data-id="pint_2">
+                <h3 CLASS="pro-align-padding-right">2)</h3>
+                <div class="unit-inner">
+                  <div class="unit unit_lett pro-text false" id="arti_24a-pass_1-pint_2-lett_a" data-id="lett_a">
+                    <h3 CLASS="pro-align-padding-right">a)</h3>
+                    <div class="unit-inner">
+                      <div data-template="xText" CLASS="pro-text">badania,</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+    const result = parseActStructureHtml(html);
+
+    const clause = result.find((n) => n.provisionType === "clause");
+    const point1 = result.find((n) => n.point === "1");
+    const point2 = result.find((n) => n.point === "2");
+    const letter = result.find((n) => n.letter === "a");
+
+    // The ustęp's own introductory text is preserved, not just its children's.
+    expect(clause?.text).toBe("1. Jednostki są obowiązane stosować wymagania:");
+    expect(clause?.citationLabel).toBe("art. 24a ust. 1");
+
+    // Nested pkt/lit hierarchy is exactly as correct as it already is under a paragraph(§).
+    expect(point1).toMatchObject({ citationLabel: "art. 24a ust. 1 pkt 1", text: "1) dobrej praktyki pobierania krwi,", parentId: clause?.id });
+    expect(point2).toMatchObject({ citationLabel: "art. 24a ust. 1 pkt 2", parentId: clause?.id });
+    expect(letter).toMatchObject({ citationLabel: "art. 24a ust. 1 pkt 2 lit. a", text: "a) badania,", parentId: point2?.id });
+
+    // No duplicate/orphaned nodes: exactly one of each expected type below the root part.
+    expect(result.filter((n) => n.provisionType === "clause")).toHaveLength(1);
+    expect(result.filter((n) => n.provisionType === "point")).toHaveLength(2);
+    expect(result.filter((n) => n.provisionType === "letter")).toHaveLength(1);
+  });
+
+  it("C1: control — an unmapped unit type is still never turned into a provision, only descended into (unlike unit_pass, which is now mapped)", () => {
+    const html = wrapDocument(`
+      <div class="unit unit_arti pro-text false" id="arti_1" data-id="arti_1">
+        <h3 CLASS="pro-none"><B CLASS="b">Art.&nbsp;1.</B></h3>
+        <div class="unit-inner">
+          <div class="unit unit_totallyunknown pro-text false" id="arti_1-mystery_1" data-id="mystery_1">
+            <div class="unit-inner">
+              <div class="unit unit_pint pro-text false" id="arti_1-mystery_1-pint_1" data-id="pint_1">
+                <h3 CLASS="pro-align-padding-right">1)</h3>
+                <div class="unit-inner">
+                  <div data-template="xText" CLASS="pro-text">punkt pod nieznanym węzłem,</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+    const result = parseActStructureHtml(html);
+
+    // No provision was created for the unknown "totallyunknown" node itself.
+    expect(result.some((n) => n.heading?.includes("mystery"))).toBe(false);
+    // But its real, known-type descendant (the point) is still found and correctly attached to
+    // the nearest KNOWN ancestor (the article) — matching the pre-existing unknown-unit contract.
+    const article = result.find((n) => n.provisionType === "article");
+    const point = result.find((n) => n.point === "1");
+    expect(point).toMatchObject({ citationLabel: "art. 1 pkt 1", parentId: article?.id });
+  });
+
+  it("C2: control — explicit '(uchylony)'/'(pominięty)' repeal markers stored as direct article text are preserved unchanged", () => {
+    const html = wrapDocument(`
+      <div class="unit unit_arti pro-text false" id="arti_10" data-id="arti_10">
+        <h3 CLASS="pro-none"><B CLASS="b">Art.&nbsp;10.</B></h3>
+        <div class="unit-inner">
+          <div data-template="xText" CLASS="pro-text">(uchylony)</div>
+        </div>
+      </div>
+    `);
+    const result = parseActStructureHtml(html);
+    const article = result.find((n) => n.provisionType === "article");
+    expect(article?.text).toBe("Art. 10. (uchylony)");
+  });
+
   it("disambiguates a duplicate data-id under the same parent (observed in the real DU/1964/93 source) rather than dropping a provision or crashing", () => {
     const html = wrapDocument(`
       <div class="unit unit_arti pro-text false" id="arti_538" data-id="arti_538">

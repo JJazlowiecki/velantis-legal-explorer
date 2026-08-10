@@ -6,8 +6,8 @@ import * as cheerio from "cheerio";
  * structured provisions. The markup is a well-formed, machine-generated XHTML tree using a
  * consistent `unit unit_<type>` class convention with hierarchical `id`/`data-id` attributes —
  * this is NOT a heuristic scrape, it is a direct structural mapping of markup that already
- * encodes the act's real legal hierarchy (Księga/Tytuł/Dział/Rozdział/Oddział/Artykuł/§/point/
- * letter), confirmed against the real DU/1964/93 (Kodeks cywilny) document.
+ * encodes the act's real legal hierarchy (Księga/Tytuł/Dział/Rozdział/Oddział/Artykuł/§/ustęp/
+ * point/letter), confirmed against the real DU/1964/93 (Kodeks cywilny) document.
  *
  * Deliberately generic across acts (not Civil-Code-specific): any of the observed unit types
  * may be absent for a given act (e.g. an act with no Księgi), matching the milestone's
@@ -23,6 +23,18 @@ const UNIT_TYPE_LABELS: Record<string, { provisionType: string; noun: string }> 
   schp: { provisionType: "subchapter", noun: "Oddział" },
   arti: { provisionType: "article", noun: "Art." },
   para: { provisionType: "paragraph", noun: "§" },
+  // "ustęp" (a numbered subdivision of an article, rendered by ISAP as a bare "1.", "2." — NOT
+  // the same Polish legal unit as "§"/paragraf, which `para` above already owns). Deliberately a
+  // DISTINCT provisionType from "paragraph" so nothing that means "§" is silently reinterpreted
+  // as "ust." or vice versa; see the ingestion-completeness-audit report for why conflating the
+  // two would have been wrong. Its number is stored in the SAME `paragraph` DB column that
+  // "paragraph"(§) uses — that column is already the repository's generic second-level numeric
+  // slot, not a §-exclusive one: parseExactCitation (citation.ts) already maps a bare "ust. N" in
+  // a user query onto this same column, and findExactCitationMatches (citation-match.ts) matches
+  // purely by column equality, never by provisionType — so reusing the column (never the type
+  // string) for "ust." numbers requires no schema change and is already the shape citation
+  // search expects.
+  pass: { provisionType: "clause", noun: "Ust." },
   pint: { provisionType: "point", noun: "" },
   lett: { provisionType: "letter", noun: "" },
 };
@@ -149,6 +161,12 @@ export function parseActStructureHtml(
       // DU/1960/168 rows); a bare "§ 1" is ambiguous once displayed outside its tree
       // position (Saved items, cited sources, etc).
       citationLabel = `${parentCitationLabel} § ${localNumber}`;
+      paragraph = localNumber;
+    } else if (config.provisionType === "clause") {
+      heading = `${localNumber}.`;
+      // Fully qualified with the ancestor article, same convention as "paragraph"(§) above —
+      // "art. 6 ust. 1", never a bare "ust. 1" or (critically) "art. 6 § 1".
+      citationLabel = `${parentCitationLabel} ust. ${localNumber}`;
       paragraph = localNumber;
     } else if (config.provisionType === "point") {
       heading = `${localNumber})`;

@@ -57,6 +57,17 @@ describe("isSearchableProvision", () => {
       isSearchableProvision({ provisionType: "point", heading: null, text: "1) przedsiębiorstw państwowych" }),
     ).toBe(true);
   });
+
+  it("includes an operative ustęp (clause), and excludes one that is a heading-only container for further points", () => {
+    expect(
+      isSearchableProvision({
+        provisionType: "clause",
+        heading: "1.",
+        text: "1. Producentowi bazy danych przysługuje wyłączne i zbywalne prawo pobierania danych.",
+      }),
+    ).toBe(true);
+    expect(isSearchableProvision({ provisionType: "clause", heading: "1.", text: "1." })).toBe(false);
+  });
 });
 
 describe("buildSearchDocumentContent", () => {
