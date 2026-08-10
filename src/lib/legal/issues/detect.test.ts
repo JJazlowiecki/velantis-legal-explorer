@@ -17,12 +17,14 @@ function withContent(content: unknown): Response {
 
 const validPayload = {
   summary: "Możliwy spór dotyczący jakości usługi remontowej.",
+  answerTargets: [{ text: "czy wykonawca odpowiada za wadliwe wykonanie usługi" }],
   issues: [
     {
       label: "nienależyte wykonanie zobowiązania",
       likelihood: "most_likely",
       rationale: "Opis wskazuje na wadliwe wykonanie usługi.",
-      retrievalQueries: ["nienależyte wykonanie zobowiązania"],
+      answerTargetIndexes: [1],
+      retrievalQueries: [{ query: "nienależyte wykonanie zobowiązania", answerTargetIndex: 1 }],
     },
   ],
 };
@@ -74,12 +76,22 @@ describe("detectLegalIssues", () => {
 
     const schema = body.response_format.json_schema.schema;
     expect(schema.additionalProperties).toBe(false);
-    expect(schema.required).toEqual(["summary", "issues", "clarificationQuestion"]);
-    expect(schema.properties.issues.items.required).toEqual(["label", "likelihood", "rationale", "retrievalQueries"]);
+    expect(schema.required).toEqual(["summary", "answerTargets", "issues", "clarificationQuestion"]);
+    expect(schema.properties.issues.items.required).toEqual([
+      "label",
+      "likelihood",
+      "rationale",
+      "answerTargetIndexes",
+      "retrievalQueries",
+    ]);
     expect(schema.properties.issues.items.properties.likelihood.enum).toEqual([
       "most_likely",
       "possible",
       "needs_more_information",
+    ]);
+    expect(schema.properties.issues.items.properties.retrievalQueries.items.required).toEqual([
+      "query",
+      "answerTargetIndex",
     ]);
   });
 
@@ -121,7 +133,7 @@ describe("detectLegalIssues", () => {
 
   it("accepts a well-formed JSON payload with an empty issues array (legitimate zero-legal-issue result)", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(
-      withContent({ summary: "Pytanie nie dotyczy żadnego zagadnienia prawnego.", issues: [] }),
+      withContent({ summary: "Pytanie nie dotyczy żadnego zagadnienia prawnego.", answerTargets: [], issues: [] }),
     );
 
     const result = await detectLegalIssues("jaka jest dzisiaj pogoda?", { apiKey: "test-key", fetchImpl, maxRetries: 0 });

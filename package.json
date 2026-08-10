@@ -20,6 +20,8 @@
     "corpus:prepare": "tsx src/scripts/prepare-current-law-corpus.ts",
     "corpus:generate": "tsx src/scripts/generate-current-law-corpus.ts",
     "corpus:eval": "tsx src/scripts/run-current-law-eval.ts",
+    "trace:legal-answer": "tsx src/scripts/trace-legal-answer.ts",
+    "eval:legal-answer-quality": "tsx src/scripts/eval-legal-answer-quality.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio"

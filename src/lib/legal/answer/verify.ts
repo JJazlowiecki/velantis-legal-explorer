@@ -60,7 +60,7 @@ Dla każdego wniosku przypisz jeden werdykt (verdict):
 ZASADY:
 - NIE korzystaj z własnej wiedzy prawniczej, aby "uratować" twierdzenie, którego dostarczone źródło faktycznie nie ustanawia treścią.
 - NIE hedguj/nie podwyższaj częściowego wsparcia do "direct_support" — jeśli masz wątpliwość, czy to pełne czy częściowe wsparcie, wybierz "partial_support" albo "no_support", nigdy nie zaokrąglaj w górę.
-- Jeżeli verdict = "direct_support", musisz podać w polu "evidence" JEDEN LUB WIĘCEJ krótkich DOSŁOWNYCH (verbatim) fragmentów tekstu źródła, które wprost ustanawiają tezę. Fragment musi być dokładnym cytatem z dostarczonego tekstu źródła — NIE WOLNO parafrazować, skracać treściowo ani rekonstruować z pamięci. Każdy fragment evidence musi zawierać poprawny "sourceId" (SOURCE_X) spośród dostarczonych dla tego wniosku.
+- Jeżeli verdict = "direct_support", musisz podać w polu "evidence" JEDEN LUB WIĘCEJ krótkich DOSŁOWNYCH (verbatim) fragmentów tekstu źródła, które wprost ustanawiają tezę. Fragment musi być CIĄGŁYM (nieprzerwanym), dokładnym cytatem z dostarczonego tekstu źródła — NIE WOLNO parafrazować, skracać treściowo, łączyć nieciągłych fragmentów w jeden cytat ani rekonstruować z pamięci. Skopiuj fragment znak w znak z dostarczonego tekstu źródła. Każdy fragment evidence musi zawierać poprawny "sourceId" (SOURCE_X) spośród dostarczonych dla tego wniosku.
 - Jeżeli verdict = "partial_support" lub "no_support", pole "evidence" powinno być puste.
 - W polu reason krótko (1-2 zdania) uzasadnij werdykt, odnosząc się do treści źródła, nie do ogólnej wiedzy prawniczej.
 - NIGDY nie wymyślaj nowych identyfikatorów źródeł, numerów artykułów ani przepisów. Cytuj WYŁĄCZNIE identyfikatory SOURCE_X dokładnie tak, jak podano dla danego wniosku.

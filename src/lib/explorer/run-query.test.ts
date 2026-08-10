@@ -21,6 +21,8 @@ function baseResult(overrides: Partial<LegalAnswerResult> = {}): LegalAnswerResu
     problemDescription: "opis problemu",
     legalActVersionIds: [VALID_UUID],
     answer: "Odpowiedź.",
+    answerTargets: [],
+    targetCoverage: [],
     conclusions: [],
     alternativePaths: [],
     uncertainties: [],

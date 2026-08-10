@@ -6,8 +6,8 @@ import { createTestDatabase } from "../../test-support/test-db";
 import type { EmbedTextsFn } from "../search/embeddings";
 import { indexLegalSearchDocuments } from "../search/indexing";
 import type { DetectLegalIssuesFn } from "./detect";
-import { investigateLegalProblem, LegalIssueInvestigationError } from "./investigate";
-import type { LegalIssueDetectionResult } from "./schema";
+import { capRetrievalQueries, investigateLegalProblem, LegalIssueInvestigationError } from "./investigate";
+import type { LegalIssueDetectionResult, LegalIssueHypothesis } from "./schema";
 
 const testDatabase = createTestDatabase();
 const describeDatabase = testDatabase ? describe : describe.skip;
@@ -36,6 +36,23 @@ const fakeEmbed: EmbedTextsFn = async (texts) => {
 afterAll(async () => {
   await client?.end({ timeout: 1 });
 });
+
+/** Shorthand for a single-query, single-target issue fixture — the common case in these tests. */
+function issueWithQuery(
+  fields: Omit<LegalIssueHypothesis, "retrievalQueries" | "answerTargetIndexes"> & {
+    query: string;
+    answerTargetIndex?: number;
+  },
+): LegalIssueHypothesis {
+  const answerTargetIndex = fields.answerTargetIndex ?? 1;
+  return {
+    label: fields.label,
+    likelihood: fields.likelihood,
+    rationale: fields.rationale,
+    answerTargetIndexes: [answerTargetIndex],
+    retrievalQueries: [{ query: fields.query, answerTargetIndex }],
+  };
+}
 
 describeDatabase("investigateLegalProblem", () => {
   beforeEach(async () => {
@@ -145,9 +162,13 @@ describeDatabase("investigateLegalProblem", () => {
     return { act, currentVersion, historicalVersion, unindexedVersion, alpha, beta };
   }
 
-  function detectionWith(issues: LegalIssueDetectionResult["issues"]): DetectLegalIssuesFn {
+  function detectionWith(
+    issues: LegalIssueHypothesis[],
+    answerTargets: LegalIssueDetectionResult["answerTargets"] = [{ text: "cel testowy" }],
+  ): DetectLegalIssuesFn {
     const detection: LegalIssueDetectionResult = {
       summary: "Możliwy spór dotyczący wykonania umowy.",
+      answerTargets,
       issues,
     };
     return async () => detection;
@@ -163,12 +184,7 @@ describeDatabase("investigateLegalProblem", () => {
         db,
         embedTexts: fakeEmbed,
         detectIssues: detectionWith([
-          {
-            label: "issue",
-            likelihood: "possible",
-            rationale: "rationale",
-            retrievalQueries: ["KEYWORD_ALPHA"],
-          },
+          issueWithQuery({ label: "issue", likelihood: "possible", rationale: "rationale", query: "KEYWORD_ALPHA" }),
         ]),
       }),
     ).rejects.toThrow(LegalIssueInvestigationError);
@@ -189,11 +205,12 @@ describeDatabase("investigateLegalProblem", () => {
       legalActVersionIds: [currentVersion.id],
       db,
       embedTexts: trackingEmbed,
-      detectIssues: detectionWith([]),
+      detectIssues: detectionWith([], []),
     });
 
     expect(searchAttempted).toBe(false);
     expect(result.issues).toEqual([]);
+    expect(result.answerTargets).toEqual([]);
     expect(result.retrievedProvisions).toEqual([]);
   });
 
@@ -210,7 +227,7 @@ describeDatabase("investigateLegalProblem", () => {
       legalActVersionIds: [currentVersion.id],
       db,
       embedTexts: fakeEmbed,
-      detectIssues: detectionWith([]),
+      detectIssues: detectionWith([], []),
     });
 
     expect(result.issues).toEqual([]);
@@ -227,12 +244,12 @@ describeDatabase("investigateLegalProblem", () => {
       db,
       embedTexts: fakeEmbed,
       detectIssues: detectionWith([
-        {
+        issueWithQuery({
           label: "nienależyte wykonanie zobowiązania",
           likelihood: "most_likely",
           rationale: "rationale",
-          retrievalQueries: ["KEYWORD_ALPHA"],
-        },
+          query: "KEYWORD_ALPHA",
+        }),
       ]),
     });
 
@@ -254,44 +271,54 @@ describeDatabase("investigateLegalProblem", () => {
       limitPerQuery: 1,
       db,
       embedTexts: fakeEmbed,
-      detectIssues: detectionWith([
-        {
-          label: "nienależyte wykonanie zobowiązania",
-          likelihood: "most_likely",
-          rationale: "Opis wskazuje na wadliwe wykonanie usługi.",
-          retrievalQueries: ["KEYWORD_ALPHA"],
-        },
-        {
-          label: "uprawnienia z rękojmi",
-          likelihood: "possible",
-          rationale: "Charakter umowy może wskazywać na rękojmię.",
-          // two queries: one hits its own provision, one overlaps with the first issue's provision
-          retrievalQueries: ["KEYWORD_BETA", "KEYWORD_ALPHA"],
-        },
-      ]),
+      detectIssues: detectionWith(
+        [
+          issueWithQuery({
+            label: "nienależyte wykonanie zobowiązania",
+            likelihood: "most_likely",
+            rationale: "Opis wskazuje na wadliwe wykonanie usługi.",
+            query: "KEYWORD_ALPHA",
+            answerTargetIndex: 1,
+          }),
+          {
+            label: "uprawnienia z rękojmi",
+            likelihood: "possible",
+            rationale: "Charakter umowy może wskazywać na rękojmię.",
+            answerTargetIndexes: [2],
+            // two queries: one hits its own provision, one overlaps with the first issue's provision
+            retrievalQueries: [
+              { query: "KEYWORD_BETA", answerTargetIndex: 2 },
+              { query: "KEYWORD_ALPHA", answerTargetIndex: 2 },
+            ],
+          },
+        ],
+        [{ text: "czy dłużnik odpowiada za nienależyte wykonanie" }, { text: "czy przysługuje rękojmia" }],
+      ),
     });
 
     expect(result.issues).toHaveLength(2);
     expect(result.issues.map((issue) => issue.likelihood)).toEqual(["most_likely", "possible"]);
 
-    // multiple retrieval queries per issue preserved
-    expect(result.issues[1].retrievalQueries).toEqual(["KEYWORD_BETA", "KEYWORD_ALPHA"]);
+    // multiple retrieval queries per issue preserved (both under the possible-issue cap of
+    // 1-per-target, since they target DIFFERENT answerTargetIndex values here: both are
+    // tagged answerTargetIndex 2 in this fixture on purpose, so only the first survives the cap)
+    expect(result.issues[1].retrievalQueries).toEqual([{ query: "KEYWORD_BETA", answerTargetIndex: 2 }]);
 
-    // cross-issue dedup: alpha was found via issue 1 (KEYWORD_ALPHA) and issue 2 (KEYWORD_ALPHA) -> appears once
+    // alpha was found only via issue 1 (KEYWORD_ALPHA) — issue 2's KEYWORD_ALPHA query was
+    // capped away (possible-issue queries capped at 1 per answerTargetIndex)
     const dedupedIds = result.retrievedProvisions.map((item) => item.legalProvisionId);
     expect(dedupedIds.filter((id) => id === alpha.id)).toHaveLength(1);
     expect(dedupedIds).toContain(beta.id);
 
     const alphaEntry = result.retrievedProvisions.find((item) => item.legalProvisionId === alpha.id);
-    expect(alphaEntry?.foundBy).toHaveLength(2);
-    expect(alphaEntry?.foundBy.map((entry) => entry.issueLabel).sort()).toEqual(
-      ["nienależyte wykonanie zobowiązania", "uprawnienia z rękojmi"].sort(),
-    );
+    expect(alphaEntry?.foundBy).toHaveLength(1);
+    expect(alphaEntry?.foundBy[0].issueLabel).toBe("nienależyte wykonanie zobowiązania");
+    expect(alphaEntry?.foundBy[0].answerTargetIndex).toBe(1);
     expect(alphaEntry?.foundBy.every((entry) => entry.retrievalQuery === "KEYWORD_ALPHA")).toBe(true);
 
     // provenance is retained per issue too (which provisions each issue's own retrieval surfaced)
     expect(result.issues[0].retrievedProvisionIds).toContain(alpha.id);
-    expect(result.issues[1].retrievedProvisionIds).toEqual(expect.arrayContaining([beta.id, alpha.id]));
+    expect(result.issues[1].retrievedProvisionIds).toEqual([beta.id]);
 
     // authority/version metadata preserved on retrieved evidence
     expect(alphaEntry?.authorityClass).toBe("authoritative");
@@ -312,16 +339,18 @@ describeDatabase("investigateLegalProblem", () => {
       db,
       embedTexts: fakeEmbed,
       detectIssues: detectionWith([
-        {
+        issueWithQuery({
           label: "zagadnienie bez pokrycia w tym korpusie",
           likelihood: "needs_more_information",
           rationale: "Brak wystarczających informacji.",
-          retrievalQueries: ["KEYWORD_NONEXISTENT_TOPIC"],
-        },
+          query: "KEYWORD_NONEXISTENT_TOPIC",
+        }),
       ]),
     });
 
     expect(result.issues).toHaveLength(1);
+    // needs_more_information issues never spend retrieval budget (Phase 3): zero queries run.
+    expect(result.issues[0].retrievalQueries).toEqual([]);
     expect(result.issues[0].retrievedProvisionIds).toEqual([]);
     expect(result.retrievedProvisions).toEqual([]);
   });
@@ -332,13 +361,9 @@ describeDatabase("investigateLegalProblem", () => {
 
     const detection: LegalIssueDetectionResult = {
       summary: "Summary",
+      answerTargets: [{ text: "cel" }],
       issues: [
-        {
-          label: "issue",
-          likelihood: "needs_more_information",
-          rationale: "rationale",
-          retrievalQueries: ["KEYWORD_ALPHA"],
-        },
+        issueWithQuery({ label: "issue", likelihood: "needs_more_information", rationale: "rationale", query: "KEYWORD_ALPHA" }),
       ],
       clarificationQuestion: "Czy strony zawarły umowę pisemną?",
     };
@@ -364,12 +389,7 @@ describeDatabase("investigateLegalProblem", () => {
       db,
       embedTexts: fakeEmbed,
       detectIssues: detectionWith([
-        {
-          label: "issue",
-          likelihood: "possible",
-          rationale: "rationale",
-          retrievalQueries: ["KEYWORD_ALPHA"],
-        },
+        issueWithQuery({ label: "issue", likelihood: "possible", rationale: "rationale", query: "KEYWORD_ALPHA" }),
       ]),
     });
 
@@ -383,6 +403,7 @@ describeDatabase("investigateLegalProblem", () => {
         "legalActVersionIds",
         "summary",
         "clarificationQuestion",
+        "answerTargets",
         "issues",
         "retrievedProvisions",
       ].sort(),
@@ -409,17 +430,86 @@ describeDatabase("investigateLegalProblem", () => {
       db,
       embedTexts: weakEmbed,
       detectIssues: detectionWith([
-        {
+        issueWithQuery({
           label: "zagadnienie o słabym dopasowaniu semantycznym",
           likelihood: "possible",
           rationale: "rationale",
-          retrievalQueries: ["zapytanie bez pokrycia leksykalnego"],
-        },
+          query: "zapytanie bez pokrycia leksykalnego",
+        }),
       ]),
     });
 
     expect(result.issues).toHaveLength(1);
     expect(result.issues[0].retrievedProvisionIds).toEqual([]);
     expect(result.retrievedProvisions).toEqual([]);
+  });
+});
+
+describe("capRetrievalQueries", () => {
+  it("drops all queries for a needs_more_information issue", () => {
+    const [result] = capRetrievalQueries([
+      issueWithQuery({ label: "x", likelihood: "needs_more_information", rationale: "r", query: "q1" }),
+    ]);
+    expect(result.retrievalQueries).toEqual([]);
+  });
+
+  it("caps a most_likely issue at 3 queries per distinct answerTargetIndex", () => {
+    const [result] = capRetrievalQueries([
+      {
+        label: "x",
+        likelihood: "most_likely",
+        rationale: "r",
+        answerTargetIndexes: [1],
+        retrievalQueries: [
+          { query: "q1", answerTargetIndex: 1 },
+          { query: "q2", answerTargetIndex: 1 },
+          { query: "q3", answerTargetIndex: 1 },
+          { query: "q4", answerTargetIndex: 1 },
+        ],
+      },
+    ]);
+    expect(result.retrievalQueries).toEqual([
+      { query: "q1", answerTargetIndex: 1 },
+      { query: "q2", answerTargetIndex: 1 },
+      { query: "q3", answerTargetIndex: 1 },
+    ]);
+  });
+
+  it("caps a possible issue at 1 query per distinct answerTargetIndex, independently per target", () => {
+    const [result] = capRetrievalQueries([
+      {
+        label: "x",
+        likelihood: "possible",
+        rationale: "r",
+        answerTargetIndexes: [1, 2],
+        retrievalQueries: [
+          { query: "q1-target1", answerTargetIndex: 1 },
+          { query: "q2-target1", answerTargetIndex: 1 },
+          { query: "q1-target2", answerTargetIndex: 2 },
+        ],
+      },
+    ]);
+    expect(result.retrievalQueries).toEqual([
+      { query: "q1-target1", answerTargetIndex: 1 },
+      { query: "q1-target2", answerTargetIndex: 2 },
+    ]);
+  });
+
+  it("is a pure function that never mutates its input", () => {
+    const input: LegalIssueHypothesis[] = [
+      {
+        label: "x",
+        likelihood: "possible",
+        rationale: "r",
+        answerTargetIndexes: [1],
+        retrievalQueries: [
+          { query: "q1", answerTargetIndex: 1 },
+          { query: "q2", answerTargetIndex: 1 },
+        ],
+      },
+    ];
+    const snapshot = JSON.parse(JSON.stringify(input));
+    capRetrievalQueries(input);
+    expect(input).toEqual(snapshot);
   });
 });

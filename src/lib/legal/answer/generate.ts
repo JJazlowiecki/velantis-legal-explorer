@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { AnswerTargetView } from "../issues/investigate";
 import type { LegalIssueLikelihood } from "../issues/schema";
 import type { PackedSource } from "./packing";
 import { buildRawFinalAnswerResponseSchema, type RawFinalAnswerResponse } from "./schema";
@@ -63,16 +64,26 @@ STYL ODPOWIEDZI (pole "answer", po polsku):
 - Unikaj: nadmiernych zastrzeżeń, ogólników, udawanej pewności, sztampowych fraz prawniczych, języka typu "jako model AI".
 - Nie zalecaj automatycznie konsultacji z prawnikiem — wspomnij o tym tylko, jeśli jest to rzeczowo istotne dla sytuacji.
 
+DYSCYPLINA TRAFNOŚCI ODPOWIEDZI (answerTargets):
+- Otrzymasz listę answerTargets — konkretnych, sformułowanych własnymi słowami użytkownika aspektów, na które oczekuje odpowiedzi. Każdy conclusion, który bezpośrednio odpowiada na jeden z nich, MUSI mieć ustawione answerTargetIndex (1-based index do answerTargets) na ten cel. Jeśli twierdzenie jest ogólne/nie odpowiada wprost na żaden konkretny answerTarget, ustaw answerTargetIndex na null.
+- Odpowiadaj NAJPIERW na answerTargets, w ich kolejności — to one są istotą pytania użytkownika, nie tło.
+- NIE dodawaj ochotniczo dodatkowych faktów (kwota, procedura, definicja, sąsiednia dziedzina prawa), jeśli nie są rzeczowo potrzebne do odpowiedzi na któryś z answerTargets — dostarczone źródła spoza celów użytkownika możesz pominąć, nawet jeśli są łatwe do zacytowania.
+- Jeśli jeden answerTarget ma silne poparcie w źródłach, a inny nie — odpowiedz na wsparty i WYRAŹNIE zaznacz (jako alternativePath lub uncertainty), że drugiego nie udało się potwierdzić dostarczonymi źródłami. NIE wypełniaj brakującego miejsca treścią poboczną w zamian.
+
 CLARIFICATION:
 - Ustaw clarificationQuestion TYLKO jeśli brakująca informacja mogłaby istotnie zmienić podstawę prawną lub treść odpowiedzi.
 
 Odpowiedz WYŁĄCZNIE poprawnym obiektem JSON w formacie:
-{"answer": string, "conclusions": [{"statement": string, "support": [{"sourceId": "SOURCE_X"}]}], "alternativePaths": [{"issueLabel": string, "explanation": string, "support": [{"sourceId": "SOURCE_X"}]}], "uncertainties": string[], "clarificationQuestion"?: string}`;
+{"answer": string, "conclusions": [{"statement": string, "support": [{"sourceId": "SOURCE_X"}], "answerTargetIndex": number|null}], "alternativePaths": [{"issueLabel": string, "explanation": string, "support": [{"sourceId": "SOURCE_X"}]}], "uncertainties": string[], "clarificationQuestion"?: string}`;
 
 export interface GenerateFinalAnswerInput {
   problemDescription: string;
   issues: { label: string; likelihood: LegalIssueLikelihood; rationale: string }[];
   sources: PackedSource[];
+  /** Requested aspects from issue detection (issues/schema.ts) — drives the answer-relevance
+   * discipline instructions and the request-scoped answerTargetIndex enum below. Empty for a
+   * non-legal problem (zero issues detected). */
+  answerTargets?: AnswerTargetView[];
 }
 
 export interface GenerateFinalAnswerOptions {
@@ -108,7 +119,7 @@ function isRetryableStatus(status: number): boolean {
  * Zod validation (buildRawFinalAnswerResponseSchema) still runs afterward as defense in
  * depth; strict Structured Outputs narrows the failure surface, it does not replace Zod.
  */
-function buildFinalAnswerJsonSchema(sourceIds: string[]) {
+function buildFinalAnswerJsonSchema(sourceIds: string[], answerTargetCount: number) {
   const sourceReferenceSchema = {
     type: "object",
     additionalProperties: false,
@@ -117,6 +128,18 @@ function buildFinalAnswerJsonSchema(sourceIds: string[]) {
     },
     required: ["sourceId"],
   };
+
+  // Strict Structured Outputs has no way to bound an integer by a runtime count with zero
+  // valid values (`enum: []` is rejected by the API) — when there are no answer targets at
+  // all (non-legal problem), this degenerates to "always null". `anyOf` (rather than a mixed
+  // `type` array plus `enum`) is the documented strict-mode pattern for "nullable enum", same
+  // idea as clarificationQuestion's plain `type: ["string", "null"]` but with a closed integer
+  // set on the non-null branch; buildRawFinalAnswerResponseSchema's superRefine is still the
+  // real enforcement layer in every case, exactly as with sourceId membership above.
+  const answerTargetIndexSchema =
+    answerTargetCount > 0
+      ? { anyOf: [{ type: "integer", enum: Array.from({ length: answerTargetCount }, (_, i) => i + 1) }, { type: "null" }] }
+      : { type: "null" };
 
   return {
     type: "object",
@@ -131,8 +154,9 @@ function buildFinalAnswerJsonSchema(sourceIds: string[]) {
           properties: {
             statement: { type: "string" },
             support: { type: "array", items: sourceReferenceSchema },
+            answerTargetIndex: answerTargetIndexSchema,
           },
-          required: ["statement", "support"],
+          required: ["statement", "support", "answerTargetIndex"],
         },
       },
       alternativePaths: {
@@ -191,6 +215,12 @@ export function formatSourceForPrompt(source: PackedSource): string {
 }
 
 function buildUserMessage(input: GenerateFinalAnswerInput): string {
+  const answerTargets = input.answerTargets ?? [];
+  const answerTargetsBlock =
+    answerTargets.length > 0
+      ? answerTargets.map((target) => `${target.index}. ${target.text}`).join("\n")
+      : "(brak wyodrębnionych celów — odpowiedz ogólnie na podstawie dostarczonych źródeł)";
+
   const issuesBlock =
     input.issues.length > 0
       ? input.issues
@@ -202,6 +232,7 @@ function buildUserMessage(input: GenerateFinalAnswerInput): string {
 
   return [
     `PROBLEM UŻYTKOWNIKA:\n${input.problemDescription}`,
+    `CELE ODPOWIEDZI (answerTargets — odpowiedz na nie w pierwszej kolejności, w tej kolejności):\n${answerTargetsBlock}`,
     `HIPOTEZY PRAWNE (niepotwierdzone):\n${issuesBlock}`,
     `ŹRÓDŁA:\n${sourcesBlock}`,
   ].join("\n\n");
@@ -230,8 +261,9 @@ export async function generateFinalAnswer(
 
   const sourceIds = input.sources.map((source) => source.sourceId);
   const validSourceIds = new Set(sourceIds);
-  const responseSchema = buildRawFinalAnswerResponseSchema(validSourceIds);
-  const jsonSchema = buildFinalAnswerJsonSchema(sourceIds);
+  const answerTargetCount = input.answerTargets?.length ?? 0;
+  const responseSchema = buildRawFinalAnswerResponseSchema(validSourceIds, answerTargetCount);
+  const jsonSchema = buildFinalAnswerJsonSchema(sourceIds, answerTargetCount);
   const userMessage = buildUserMessage(input);
 
   for (let attempt = 0; ; attempt += 1) {

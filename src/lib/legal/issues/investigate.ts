@@ -5,7 +5,7 @@ import type { EmbedTextsFn } from "../search/embeddings";
 import { hybridLegalSearch } from "../search/service";
 import type { HybridSearchResult } from "../search/types";
 import { detectLegalIssues, type DetectLegalIssuesFn, type DetectLegalIssuesOptions } from "./detect";
-import type { LegalIssueLikelihood } from "./schema";
+import type { LegalIssueHypothesis, LegalIssueLikelihood, RetrievalQueryPlan } from "./schema";
 
 export class LegalIssueInvestigationError extends Error {
   constructor(message: string) {
@@ -30,6 +30,9 @@ export interface RetrievalProvenanceEntry {
   issueLabel: string;
   issueLikelihood: LegalIssueLikelihood;
   retrievalQuery: string;
+  /** 1-based index into `LegalIssueInvestigationResult.answerTargets` — which requested aspect
+   * this specific query was trying to answer. */
+  answerTargetIndex: number;
   lexicalRank: number | null;
   vectorRank: number | null;
   vectorSimilarity: number | null;
@@ -48,11 +51,20 @@ export interface LegalIssueInvestigationIssue {
   label: string;
   likelihood: LegalIssueLikelihood;
   rationale: string;
-  retrievalQueries: string[];
+  answerTargetIndexes: number[];
+  /** The queries actually executed for this issue, AFTER the bounded-allocation cap
+   * (see capRetrievalQueries) — may be a strict subset of what detection proposed. */
+  retrievalQueries: RetrievalQueryPlan[];
   /** legalProvisionIds into `retrievedProvisions`, in this issue's relevance order.
    * Empty when this hypothesis found no supporting provisions — that fact is preserved,
    * never silently dropped or presented as verified. */
   retrievedProvisionIds: string[];
+}
+
+export interface AnswerTargetView {
+  /** 1-based, matching every answerTargetIndex reference elsewhere in this result. */
+  index: number;
+  text: string;
 }
 
 export interface LegalIssueInvestigationResult {
@@ -60,12 +72,50 @@ export interface LegalIssueInvestigationResult {
   legalActVersionIds: string[];
   summary: string;
   clarificationQuestion: string | null;
+  /** Concrete, user-worded requested aspects derived by issue detection — see answerTargetSchema. */
+  answerTargets: AnswerTargetView[];
   issues: LegalIssueInvestigationIssue[];
   /** Deduplicated across all issues/queries. This is retrieval evidence only — not a final answer. */
   retrievedProvisions: DeduplicatedRetrievedProvision[];
 }
 
 const DEFAULT_LIMIT_PER_QUERY = 5;
+
+/** Bounded retrieval-query allocation per answerTarget (Phase 3): a code-level backstop on top
+ * of the prompt's own guidance, so query budget can never silently be dominated by peripheral
+ * "possible" hypotheses regardless of what the model actually returns. `needs_more_information`
+ * issues never spend retrieval budget at all — a clarifying question is the appropriate response
+ * to that likelihood, not a speculative search. */
+const MAX_QUERIES_PER_TARGET_MOST_LIKELY = 3;
+const MAX_QUERIES_PER_TARGET_POSSIBLE = 1;
+
+/**
+ * Deterministic, pure (no network/DB) cap applied to whatever issue detection returned, before
+ * any retrieval happens. Preserves original relative ordering; only removes queries once a given
+ * issue has already spent its per-answerTarget allocation on an earlier query in the list.
+ */
+export function capRetrievalQueries(issues: LegalIssueHypothesis[]): LegalIssueHypothesis[] {
+  return issues.map((issue) => {
+    if (issue.likelihood === "needs_more_information") {
+      return { ...issue, retrievalQueries: [] };
+    }
+
+    const maxPerTarget =
+      issue.likelihood === "most_likely" ? MAX_QUERIES_PER_TARGET_MOST_LIKELY : MAX_QUERIES_PER_TARGET_POSSIBLE;
+
+    const usedPerTarget = new Map<number, number>();
+    const capped = issue.retrievalQueries.filter((queryPlan) => {
+      const used = usedPerTarget.get(queryPlan.answerTargetIndex) ?? 0;
+      if (used >= maxPerTarget) {
+        return false;
+      }
+      usedPerTarget.set(queryPlan.answerTargetIndex, used + 1);
+      return true;
+    });
+
+    return { ...issue, retrievalQueries: capped };
+  });
+}
 
 export async function investigateLegalProblem(
   options: InvestigateLegalProblemOptions,
@@ -86,16 +136,22 @@ export async function investigateLegalProblem(
   const detectIssues = options.detectIssues ?? detectLegalIssues;
 
   const detection = await detectIssues(problemDescription, options.detectIssuesOptions);
+  const cappedIssues = capRetrievalQueries(detection.issues);
+
+  const answerTargets: AnswerTargetView[] = detection.answerTargets.map((target, i) => ({
+    index: i + 1,
+    text: target.text,
+  }));
 
   const deduplicated = new Map<string, DeduplicatedRetrievedProvision>();
   const issues: LegalIssueInvestigationIssue[] = [];
 
-  for (const issue of detection.issues) {
+  for (const issue of cappedIssues) {
     const provisionIdsForIssue: string[] = [];
 
-    for (const retrievalQuery of issue.retrievalQueries) {
+    for (const queryPlan of issue.retrievalQueries) {
       const searchResult = await hybridLegalSearch({
-        query: retrievalQuery,
+        query: queryPlan.query,
         legalActVersionIds,
         limit: limitPerQuery,
         db: options.db,
@@ -111,7 +167,8 @@ export async function investigateLegalProblem(
         const provenance: RetrievalProvenanceEntry = {
           issueLabel: issue.label,
           issueLikelihood: issue.likelihood,
-          retrievalQuery,
+          retrievalQuery: queryPlan.query,
+          answerTargetIndex: queryPlan.answerTargetIndex,
           lexicalRank: hit.lexicalRank,
           vectorRank: hit.vectorRank,
           vectorSimilarity: hit.vectorSimilarity,
@@ -145,6 +202,7 @@ export async function investigateLegalProblem(
       label: issue.label,
       likelihood: issue.likelihood,
       rationale: issue.rationale,
+      answerTargetIndexes: issue.answerTargetIndexes,
       retrievalQueries: issue.retrievalQueries,
       retrievedProvisionIds: provisionIdsForIssue,
     });
@@ -155,6 +213,7 @@ export async function investigateLegalProblem(
     legalActVersionIds,
     summary: detection.summary,
     clarificationQuestion: detection.clarificationQuestion ?? null,
+    answerTargets,
     issues,
     retrievedProvisions: [...deduplicated.values()],
   };

@@ -75,6 +75,9 @@ async function main() {
     console.log(result.problemDescription);
     console.log("");
     console.log(`SUMMARY: ${result.summary}`);
+    console.log(
+      `ANSWER TARGETS: ${result.answerTargets.length === 0 ? "(none)" : result.answerTargets.map((t) => `[${t.index}] ${t.text}`).join(" | ")}`,
+    );
     if (result.clarificationQuestion) {
       console.log(`CLARIFICATION NEEDED: ${result.clarificationQuestion}`);
     }
@@ -88,7 +91,9 @@ async function main() {
       console.log(`ISSUE ${index + 1}: ${issue.label}`);
       console.log(`likelihood: ${issue.likelihood}`);
       console.log(`rationale: ${issue.rationale}`);
-      console.log(`retrieval queries: ${issue.retrievalQueries.join(" | ")}`);
+      console.log(
+        `retrieval queries: ${issue.retrievalQueries.map((q) => `${q.query} (target ${q.answerTargetIndex})`).join(" | ")}`,
+      );
 
       if (issue.retrievedProvisionIds.length === 0) {
         console.log("retrieved provisions: none (hypothesis unsupported by retrieval in this corpus)");

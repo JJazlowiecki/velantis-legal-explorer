@@ -3,17 +3,18 @@ import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import * as schema from "../../../db/schema";
 import type { EmbedTextsFn } from "../search/embeddings";
 import { type DetectLegalIssuesFn, type DetectLegalIssuesOptions } from "../issues/detect";
-import { investigateLegalProblem } from "../issues/investigate";
+import { investigateLegalProblem, type AnswerTargetView, type LegalIssueInvestigationIssue } from "../issues/investigate";
 import { validateEvidenceAgainstSources } from "./evidence";
-import { generateFinalAnswer, type GenerateFinalAnswerFn, type GenerateFinalAnswerOptions } from "./generate";
+import { FinalAnswerGenerationError, generateFinalAnswer, type GenerateFinalAnswerFn, type GenerateFinalAnswerOptions } from "./generate";
 import { packSources, type CurrentCorpusPackingContext, type PackedSource } from "./packing";
 import {
   generateRecoveryConclusions,
+  RecoveryGenerationError,
   type GenerateRecoveryConclusionsFn,
   type GenerateRecoveryConclusionsOptions,
 } from "./recovery";
 import type { RawRecoveryResponse, RecoveryConclusion } from "./recovery-schema";
-import type { FinalAnswerConclusion, FinalAnswerSourceReference } from "./schema";
+import type { FinalAnswerConclusion, FinalAnswerSourceReference, RawFinalAnswerResponse } from "./schema";
 import {
   runSkepticalVerification,
   type ConclusionForSkepticReview,
@@ -65,6 +66,12 @@ export interface AnswerLegalProblemOptions {
   runSkepticalVerificationOptions?: RunSkepticalVerificationOptions;
   generateRecoveryConclusions?: GenerateRecoveryConclusionsFn;
   generateRecoveryConclusionsOptions?: GenerateRecoveryConclusionsOptions;
+  /**
+   * Phase 13 (internal developer explainability): when true, `LegalAnswerResult.trace` is
+   * populated from data this function already computes — no new OpenAI calls, no persistence,
+   * disabled by default. See `LegalAnswerTrace` and src/scripts/trace-legal-answer.ts.
+   */
+  collectTrace?: boolean;
 }
 
 /** Full source metadata resolved back from a SOURCE_X reference — never just a bare id. */
@@ -85,6 +92,10 @@ export interface ResolvedSourceReference {
 export interface ResolvedConclusion {
   statement: string;
   support: ResolvedSourceReference[];
+  /** 1-based index into `answerTargets`, or null for a general claim not tied to one specific
+   * requested aspect (Phase 10). Opaque metadata carried through from the generator/recovery —
+   * verify.ts/skeptic.ts never read or gate on it. */
+  answerTargetIndex: number | null;
 }
 
 export interface ResolvedAlternativePath {
@@ -95,21 +106,71 @@ export interface ResolvedAlternativePath {
 
 export type LegalAnswerStatus = "answered" | "insufficient_evidence";
 
+export type AnswerTargetCoverageStatus = "verified" | "unsupported";
+
+/**
+ * Deterministic, post-verification coverage assessment (Phase 11) — never invents a claim, only
+ * reports what actually survived. A target is "verified" iff at least one verified conclusion
+ * carries its index; otherwise "unsupported", regardless of how much peripheral evidence exists.
+ */
+export interface AnswerTargetCoverage extends AnswerTargetView {
+  status: AnswerTargetCoverageStatus;
+}
+
+/**
+ * Phase 13 debug trace — internal developer explainability only, assembled purely from data
+ * this function already computes (no new OpenAI calls, no persistence). Undefined unless
+ * `AnswerLegalProblemOptions.collectTrace` is true. Never wired into the Explorer UI/runtime.
+ */
+export interface LegalAnswerTrace {
+  answerTargets: AnswerTargetView[];
+  issues: LegalIssueInvestigationIssue[];
+  retrievedProvisionCount: number;
+  packedSources: PackedSource[];
+  draftConclusions: FinalAnswerConclusion[];
+  /** Set only when normal generation itself failed structurally (invalid/malformed model
+   * output, refusal, non-stop finish_reason) — never for infra failures, which propagate as
+   * thrown errors instead of reaching this trace at all. Null when generation succeeded. */
+  generationStructuralFailureReason: string | null;
+  rawVerifyResults: RawConclusionVerificationResult[];
+  rawSkepticResults: SkepticResult[];
+  recoveryRan: boolean;
+  /** Set only when the recovery pass itself failed structurally (same distinction as
+   * generationStructuralFailureReason). Null when recovery wasn't run, or ran and either
+   * succeeded or failed only for an infra reason (still swallowed by design — see
+   * runRecoveryPass — but not reported here as "structural"). */
+  recoveryStructuralFailureReason: string | null;
+  targetCoverage: AnswerTargetCoverage[];
+}
+
 export interface LegalAnswerResult {
   status: LegalAnswerStatus;
   problemDescription: string;
   legalActVersionIds: string[];
   answer: string;
+  answerTargets: AnswerTargetView[];
+  targetCoverage: AnswerTargetCoverage[];
   conclusions: ResolvedConclusion[];
   alternativePaths: ResolvedAlternativePath[];
   uncertainties: string[];
   clarificationQuestion: string | null;
   /** Every source actually supplied to the model — the full evidence boundary, for transparency. */
   sources: PackedSource[];
+  /** See LegalAnswerTrace — present only when `collectTrace: true` was requested. */
+  trace?: LegalAnswerTrace;
 }
 
 const INSUFFICIENT_EVIDENCE_ANSWER =
   "Dostępne źródła w przeszukanym korpusie nie zawierają przepisów wystarczających, aby odpowiedzieć na to pytanie. Nie można wskazać podstawy prawnej bez odpowiednich przepisów w tym korpusie.";
+
+/**
+ * Surfaced only when normal generation itself failed structurally (see the catch around the
+ * `generate(...)` call in answerLegalProblem) — distinct from GENERATION rejecting a claim at
+ * verification, which has its own message (INSUFFICIENT_EVIDENCE_AFTER_VERIFICATION_ANSWER).
+ * Never shown for infra/config failures, which throw instead of reaching this constant.
+ */
+const GENERATION_STRUCTURAL_FAILURE_UNCERTAINTY =
+  "Wygenerowanie wstępnej odpowiedzi nie powiodło się z przyczyn technicznych (nieprawidłowy format odpowiedzi modelu) — podjęto próbę odzyskania odpowiedzi wyłącznie na podstawie źródeł.";
 
 function resolveSupport(
   support: FinalAnswerSourceReference[],
@@ -168,6 +229,8 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
       problemDescription: investigation.problemDescription,
       legalActVersionIds: investigation.legalActVersionIds,
       answer: INSUFFICIENT_EVIDENCE_ANSWER,
+      answerTargets: investigation.answerTargets,
+      targetCoverage: investigation.answerTargets.map((target) => ({ ...target, status: "unsupported" as const })),
       conclusions: [],
       alternativePaths: investigation.issues.map((issue) => ({
         issueLabel: issue.label,
@@ -177,28 +240,71 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
       uncertainties: ["Wyszukiwanie nie zwróciło żadnych pasujących przepisów w tym korpusie dla tego zapytania."],
       clarificationQuestion: investigation.clarificationQuestion,
       sources: [],
+      trace: options.collectTrace
+        ? {
+            answerTargets: investigation.answerTargets,
+            issues: investigation.issues,
+            retrievedProvisionCount: 0,
+            packedSources: [],
+            draftConclusions: [],
+            generationStructuralFailureReason: null,
+            rawVerifyResults: [],
+            rawSkepticResults: [],
+            recoveryRan: false,
+            recoveryStructuralFailureReason: null,
+            targetCoverage: investigation.answerTargets.map((target) => ({ ...target, status: "unsupported" as const })),
+          }
+        : undefined,
     };
   }
 
   const packedSources = packSources(investigation.retrievedProvisions, {
     maxSources: options.maxSources,
+    answerTargets: investigation.answerTargets,
     currentCorpusContext: options.currentCorpusContext,
   });
   const packedBySourceId = new Map(packedSources.map((source) => [source.sourceId, source]));
 
   const generate = options.generateFinalAnswer ?? generateFinalAnswer;
-  const raw = await generate(
-    {
-      problemDescription: investigation.problemDescription,
-      issues: investigation.issues.map((issue) => ({
-        label: issue.label,
-        likelihood: issue.likelihood,
-        rationale: issue.rationale,
-      })),
-      sources: packedSources,
-    },
-    options.generateFinalAnswerOptions,
-  );
+  let raw: RawFinalAnswerResponse;
+  let generationStructuralFailureReason: string | null = null;
+  try {
+    raw = await generate(
+      {
+        problemDescription: investigation.problemDescription,
+        issues: investigation.issues.map((issue) => ({
+          label: issue.label,
+          likelihood: issue.likelihood,
+          rationale: issue.rationale,
+        })),
+        sources: packedSources,
+        answerTargets: investigation.answerTargets,
+      },
+      options.generateFinalAnswerOptions,
+    );
+  } catch (error) {
+    if (error instanceof FinalAnswerGenerationError && error.code === "INVALID_RESPONSE") {
+      // Fail closed, not fail loud: the model produced a structurally invalid response (or
+      // explicitly refused) rather than a safely groundable one — e.g. a conclusion with empty
+      // `support` violates the schema and is correctly rejected rather than silently accepted.
+      // This is NEVER treated as "no legal basis exists"; it degenerates into an empty draft,
+      // which flows through the exact same verify/recovery machinery as a real zero-conclusion
+      // draft (recovery still gets a fair, independent shot at the same packed sources below).
+      // CONFIG/HTTP_ERROR/TIMEOUT are infrastructure/configuration failures, not answer-validity
+      // failures, and are deliberately NOT caught here — they propagate as thrown errors so a
+      // genuine outage is never silently mistaken for "insufficient evidence."
+      generationStructuralFailureReason = error.message;
+      raw = {
+        answer: "",
+        conclusions: [],
+        alternativePaths: [],
+        uncertainties: [GENERATION_STRUCTURAL_FAILURE_UNCERTAINTY],
+        clarificationQuestion: undefined,
+      };
+    } else {
+      throw error;
+    }
+  }
 
   const draftAlternativePaths = raw.alternativePaths.map((path) => ({
     issueLabel: path.issueLabel,
@@ -215,26 +321,53 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
 
   let verifiedConclusions = firstPass.verifiedConclusions;
   let demotedAlternativePaths = firstPass.demotedAlternativePaths;
+  let recoveryRan = false;
+  let recoveryStructuralFailureReason: string | null = null;
+  let rawVerifyResults = firstPass.rawVerifyResults;
+  let rawSkepticResults = firstPass.rawSkepticResults;
 
   // Bounded, single source-first recovery pass: only when usable retrieval evidence exists
   // (guaranteed at this point — the zero-provisions case already returned above) AND the
-  // normal generate -> verify -> skeptic pipeline produced zero verified conclusions. Never
-  // runs when at least one conclusion already survived, and never loops or retries beyond
-  // this single call. See recovery.ts and runRecoveryPass for why this cannot rescue a
-  // rejected claim — it rebuilds from source text alone and is re-verified through the exact
-  // same gates as the first pass.
+  // normal generate -> verify -> skeptic pipeline produced zero verified conclusions (this
+  // includes the case where generation itself failed structurally, above — recovery still
+  // gets an independent shot at the same packed sources). Never runs when at least one
+  // conclusion already survived, and never loops or retries beyond this single call. See
+  // recovery.ts and runRecoveryPass for why this cannot rescue a rejected claim — it rebuilds
+  // from source text alone and is re-verified through the exact same gates as the first pass.
   if (verifiedConclusions.length === 0) {
+    recoveryRan = true;
     const recoveryPass = await runRecoveryPass(
       investigation.problemDescription,
       packedSources,
       packedBySourceId,
+      investigation.answerTargets,
       options,
     );
     verifiedConclusions = recoveryPass.verifiedConclusions;
     demotedAlternativePaths = [...demotedAlternativePaths, ...recoveryPass.demotedAlternativePaths];
+    rawVerifyResults = [...rawVerifyResults, ...recoveryPass.rawVerifyResults];
+    rawSkepticResults = [...rawSkepticResults, ...recoveryPass.rawSkepticResults];
+    recoveryStructuralFailureReason = recoveryPass.structuralFailureReason;
   }
 
   const alternativePaths = [...draftAlternativePaths, ...demotedAlternativePaths];
+  const targetCoverage = computeTargetCoverage(investigation.answerTargets, verifiedConclusions);
+
+  const trace: LegalAnswerTrace | undefined = options.collectTrace
+    ? {
+        answerTargets: investigation.answerTargets,
+        issues: investigation.issues,
+        retrievedProvisionCount: investigation.retrievedProvisions.length,
+        packedSources,
+        draftConclusions: raw.conclusions,
+        generationStructuralFailureReason,
+        rawVerifyResults,
+        rawSkepticResults,
+        recoveryRan,
+        recoveryStructuralFailureReason,
+        targetCoverage,
+      }
+    : undefined;
 
   if (verifiedConclusions.length === 0) {
     return {
@@ -242,6 +375,8 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
       problemDescription: investigation.problemDescription,
       legalActVersionIds: investigation.legalActVersionIds,
       answer: INSUFFICIENT_EVIDENCE_AFTER_VERIFICATION_ANSWER,
+      answerTargets: investigation.answerTargets,
+      targetCoverage,
       conclusions: [],
       alternativePaths,
       uncertainties: [
@@ -250,6 +385,7 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
       ],
       clarificationQuestion: raw.clarificationQuestion ?? investigation.clarificationQuestion,
       sources: packedSources,
+      trace,
     };
   }
 
@@ -266,13 +402,41 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
     // genuine draftAlternativePaths are rendered into prose, never demotedAlternativePaths —
     // a demoted item's `issueLabel` is the verbatim rejected claim, and restating it as an
     // "other possible issue" in the user-facing text would reopen exactly the leak this fixes.
-    answer: buildDeterministicAnswerText(verifiedConclusions, draftAlternativePaths, uncertainties, clarificationQuestion),
+    answer: buildDeterministicAnswerText(
+      investigation.answerTargets,
+      targetCoverage,
+      verifiedConclusions,
+      draftAlternativePaths,
+      uncertainties,
+      clarificationQuestion,
+    ),
+    answerTargets: investigation.answerTargets,
+    targetCoverage,
     conclusions: verifiedConclusions,
     alternativePaths,
     uncertainties,
     clarificationQuestion,
     sources: packedSources,
+    trace,
   };
+}
+
+/**
+ * Deterministic, post-verification coverage assessment (Phase 11). Never invents a claim —
+ * "verified" requires an actual verified conclusion carrying that target's index; everything
+ * else (including a target with only demoted/unsupported draft claims) is "unsupported".
+ */
+function computeTargetCoverage(
+  answerTargets: AnswerTargetView[],
+  verifiedConclusions: ResolvedConclusion[],
+): AnswerTargetCoverage[] {
+  const verifiedTargetIndexes = new Set(
+    verifiedConclusions.map((c) => c.answerTargetIndex).filter((index): index is number => index !== null),
+  );
+  return answerTargets.map((target) => ({
+    ...target,
+    status: verifiedTargetIndexes.has(target.index) ? "verified" : "unsupported",
+  }));
 }
 
 /**
@@ -280,8 +444,16 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
  * call. This is what makes the fail-closed guarantee airtight for the prose, not just the
  * structured `conclusions` array: a rejected claim can never leak into the final answer text
  * because the text is never generated by (or copied from) the model after verification runs.
+ *
+ * Phase 9-11 relevance discipline: conclusions are reordered so verified answers to the user's
+ * own answerTargets lead, IN TARGET ORDER — a peripheral, untagged-but-verified claim (e.g. a
+ * definition that happened to be easy to verify) can never crowd out or precede a direct answer
+ * to what was actually asked. Any answerTarget left unsupported gets an explicit, honest note
+ * instead of being silently omitted or papered over with peripheral content.
  */
 function buildDeterministicAnswerText(
+  answerTargets: AnswerTargetView[],
+  targetCoverage: AnswerTargetCoverage[],
   conclusions: ResolvedConclusion[],
   alternativePaths: ResolvedAlternativePath[],
   uncertainties: string[],
@@ -289,9 +461,34 @@ function buildDeterministicAnswerText(
 ): string {
   const sections: string[] = ["Na podstawie przeszukanych i zweryfikowanych przepisów można wskazać następujące ustalenia:"];
 
+  const conclusionsByTargetIndex = new Map<number, ResolvedConclusion[]>();
+  const untaggedConclusions: ResolvedConclusion[] = [];
   for (const conclusion of conclusions) {
+    if (conclusion.answerTargetIndex === null) {
+      untaggedConclusions.push(conclusion);
+      continue;
+    }
+    const bucket = conclusionsByTargetIndex.get(conclusion.answerTargetIndex) ?? [];
+    bucket.push(conclusion);
+    conclusionsByTargetIndex.set(conclusion.answerTargetIndex, bucket);
+  }
+
+  const orderedConclusions: ResolvedConclusion[] = [
+    ...answerTargets.flatMap((target) => conclusionsByTargetIndex.get(target.index) ?? []),
+    ...untaggedConclusions,
+  ];
+
+  for (const conclusion of orderedConclusions) {
     const citations = conclusion.support.map((source) => source.citationLabel).join(", ");
     sections.push(citations.length > 0 ? `${conclusion.statement} (${citations})` : conclusion.statement);
+  }
+
+  const unsupportedTargets = targetCoverage.filter((target) => target.status === "unsupported");
+  if (unsupportedTargets.length > 0) {
+    const items = unsupportedTargets.map((target) => `- ${target.text}`).join("\n");
+    sections.push(
+      `Następujących aspektów pytania nie udało się potwierdzić dostarczonymi, zweryfikowanymi przepisami:\n${items}`,
+    );
   }
 
   const unsupportedPaths = alternativePaths.filter((path) => path.explanation.length > 0);
@@ -336,14 +533,22 @@ function buildDeterministicAnswerText(
  * Any failure at any stage fails closed: the conclusion is never returned as verified, only
  * ever as a demoted, unsupported alternative path with empty support.
  */
+interface VerifyDraftConclusionsResult {
+  verifiedConclusions: ResolvedConclusion[];
+  demotedAlternativePaths: ResolvedAlternativePath[];
+  /** Raw stage-1/stage-2 model outputs, for the Phase 13 debug trace only. */
+  rawVerifyResults: RawConclusionVerificationResult[];
+  rawSkepticResults: SkepticResult[];
+}
+
 async function verifyDraftConclusions(
   problemDescription: string,
   draftConclusions: FinalAnswerConclusion[],
   packedBySourceId: Map<string, PackedSource>,
   options: AnswerLegalProblemOptions,
-): Promise<{ verifiedConclusions: ResolvedConclusion[]; demotedAlternativePaths: ResolvedAlternativePath[] }> {
+): Promise<VerifyDraftConclusionsResult> {
   if (draftConclusions.length === 0) {
-    return { verifiedConclusions: [], demotedAlternativePaths: [] };
+    return { verifiedConclusions: [], demotedAlternativePaths: [], rawVerifyResults: [], rawSkepticResults: [] };
   }
 
   const conclusionsToVerify = draftConclusions.map((conclusion, conclusionIndex) => ({
@@ -427,7 +632,7 @@ async function verifyDraftConclusions(
   });
 
   if (strictPassed.length === 0) {
-    return { verifiedConclusions: [], demotedAlternativePaths };
+    return { verifiedConclusions: [], demotedAlternativePaths, rawVerifyResults: strictResults, rawSkepticResults: [] };
   }
 
   const skepticInput: ConclusionForSkepticReview[] = strictPassed.map((passed) => ({
@@ -477,10 +682,11 @@ async function verifyDraftConclusions(
         uniqueSourceIds.map((sourceId) => ({ sourceId })),
         packedBySourceId,
       ),
+      answerTargetIndex: passed.conclusion.answerTargetIndex ?? null,
     });
   }
 
-  return { verifiedConclusions, demotedAlternativePaths };
+  return { verifiedConclusions, demotedAlternativePaths, rawVerifyResults: strictResults, rawSkepticResults: skepticResults };
 }
 
 /**
@@ -518,47 +724,79 @@ function filterRecoveryConclusionsByOwnExcerpt(
     survivors.push({
       statement: conclusion.statement,
       support: conclusion.support.map((item) => ({ sourceId: item.sourceId })),
+      // Threaded through unchanged: recovery now receives the SAME answerTargets as normal
+      // generation (see runRecoveryPass) and can tag its own conclusions the same way — this
+      // is what makes computeTargetCoverage able to credit a recovery-sourced answer to the
+      // target it actually addresses, instead of every recovery conclusion silently reading
+      // as "unsupported" for every target regardless of relevance.
+      answerTargetIndex: conclusion.answerTargetIndex ?? null,
     });
   }
 
   return survivors;
 }
 
+interface RecoveryPassResult extends VerifyDraftConclusionsResult {
+  /** Set only when recovery generation itself failed structurally (invalid/malformed model
+   * output, refusal, non-stop finish_reason, or an out-of-range answerTargetIndex rejected by
+   * buildRawRecoveryResponseSchema) — never for infra failures (CONFIG/HTTP_ERROR/TIMEOUT),
+   * which are still swallowed here (recovery remains a best-effort, non-fatal pass by design)
+   * but are NOT reported as "structural" since they say nothing about answer validity. */
+  structuralFailureReason: string | null;
+}
+
 /**
  * Runs the single, bounded source-first recovery pass (see recovery.ts for the generation
  * prompt/schema). Recovery conclusions receive NO privileged treatment: after the self-
  * excerpt gate above, survivors are funneled through the identical verifyDraftConclusions
- * used for the first pass — same strict verifier, same evidence validation, same skeptic. A
- * recovery-generation failure (network/timeout/malformed output) is caught and logged here
- * rather than thrown, so a recovery hiccup can never turn what would otherwise have been a
- * safe insufficient_evidence result into a hard error — it just means recovery contributes
- * nothing, and the caller's existing insufficient_evidence fallback still applies.
+ * used for the first pass — same strict verifier, same evidence validation, same skeptic.
+ * `answerTargetIndex` tagging (see filterRecoveryConclusionsByOwnExcerpt) is likewise never
+ * trusted by those gates — it only affects relevance/coverage assembly AFTER a claim has
+ * independently survived them. A recovery-generation failure (network/timeout/malformed
+ * output) is caught and logged here rather than thrown, so a recovery hiccup can never turn
+ * what would otherwise have been a safe insufficient_evidence result into a hard error — it
+ * just means recovery contributes nothing, and the caller's existing insufficient_evidence
+ * fallback still applies. This is intentionally broader than the normal-generation fail-closed
+ * boundary above: recovery is already a best-effort last resort, so ANY failure (not only
+ * INVALID_RESPONSE) safely degenerates to "recovery contributes nothing" — never a thrown
+ * error — while still distinguishing a structural (answer-validity) failure from an infra one
+ * for logging/trace purposes only.
  */
 async function runRecoveryPass(
   problemDescription: string,
   packedSources: PackedSource[],
   packedBySourceId: Map<string, PackedSource>,
+  answerTargets: AnswerTargetView[],
   options: AnswerLegalProblemOptions,
-): Promise<{ verifiedConclusions: ResolvedConclusion[]; demotedAlternativePaths: ResolvedAlternativePath[] }> {
+): Promise<RecoveryPassResult> {
   const generateRecovery = options.generateRecoveryConclusions ?? generateRecoveryConclusions;
 
   let recoveryRaw: RawRecoveryResponse;
   try {
     recoveryRaw = await generateRecovery(
-      { problemDescription, sources: packedSources },
+      { problemDescription, sources: packedSources, answerTargets },
       options.generateRecoveryConclusionsOptions,
     );
   } catch (error) {
+    const structuralFailureReason =
+      error instanceof RecoveryGenerationError && error.code === "INVALID_RESPONSE" ? error.message : null;
     console.error(
       "Recovery generation pass failed; falling back to the existing insufficient_evidence result:",
       error instanceof Error ? error.message : "unknown error",
     );
-    return { verifiedConclusions: [], demotedAlternativePaths: [] };
+    return {
+      verifiedConclusions: [],
+      demotedAlternativePaths: [],
+      rawVerifyResults: [],
+      rawSkepticResults: [],
+      structuralFailureReason,
+    };
   }
 
   const survivors = filterRecoveryConclusionsByOwnExcerpt(recoveryRaw.conclusions, packedBySourceId);
 
-  return verifyDraftConclusions(problemDescription, survivors, packedBySourceId, options);
+  const verified = await verifyDraftConclusions(problemDescription, survivors, packedBySourceId, options);
+  return { ...verified, structuralFailureReason: null };
 }
 
 function getPackedSource(sourceId: string, packedBySourceId: Map<string, PackedSource>): PackedSource {

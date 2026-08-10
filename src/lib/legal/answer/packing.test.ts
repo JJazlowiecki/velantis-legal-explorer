@@ -8,6 +8,7 @@ function provenance(overrides: Partial<RetrievalProvenanceEntry> = {}): Retrieva
     issueLabel: "issue",
     issueLikelihood: "possible",
     retrievalQuery: "query",
+    answerTargetIndex: 1,
     lexicalRank: null,
     vectorRank: 1,
     vectorSimilarity: 0.5,
@@ -116,6 +117,133 @@ describe("packSources", () => {
 
   it("returns an empty array for no provisions", () => {
     expect(packSources([])).toEqual([]);
+  });
+
+  describe("answerTarget-aware reservation (PASS 1)", () => {
+    it("reserves the best most_likely-found candidate for a target even though it ranks below the global fixed cut", () => {
+      // Reproduces the live database-rights defect: art. 6 ust. 1 (found via a most_likely
+      // issue, but with a mediocre raw finalScore) was previously cut by a flat maxSources=12
+      // ranking even though 8+ candidates found ONLY via possible issues outranked it by raw
+      // score alone.
+      const central = provision({
+        legalProvisionId: "art-6-ust-1",
+        citationLabel: "art. 6 ust. 1",
+        foundBy: [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 1, finalScore: 0.02 })],
+      });
+      const peripherals = Array.from({ length: 11 }, (_, i) =>
+        provision({
+          legalProvisionId: `peripheral-${i}`,
+          citationLabel: `art. ${i}`,
+          foundBy: [provenance({ issueLikelihood: "possible", answerTargetIndex: 2, finalScore: 0.033 })],
+        }),
+      );
+
+      const packed = packSources([...peripherals, central], {
+        maxSources: 5,
+        answerTargets: [{ index: 1, text: "jakie prawa ma producent" }],
+      });
+
+      expect(packed.some((s) => s.legalProvisionId === "art-6-ust-1")).toBe(true);
+    });
+
+    it("tags a reserved source with the answerTargetIndex it was reserved for", () => {
+      const central = provision({
+        legalProvisionId: "p1",
+        foundBy: [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 2, finalScore: 0.02 })],
+      });
+      const packed = packSources([central], { answerTargets: [{ index: 2, text: "target" }] });
+      expect(packed[0].reservedForAnswerTargetIndexes).toEqual([2]);
+    });
+
+    it("leaves reservedForAnswerTargetIndexes empty for a pass-2 (global-fill) source", () => {
+      const p = provision({ foundBy: [provenance({ issueLikelihood: "possible", answerTargetIndex: 1 })] });
+      const packed = packSources([p], { answerTargets: [{ index: 1, text: "unrelated target" }] });
+      // Nothing was found via a most_likely issue for target 1, so nothing is reserved — the
+      // single candidate is packed only via pass 2.
+      expect(packed[0].reservedForAnswerTargetIndexes).toEqual([]);
+    });
+
+    it("skips a target with no qualifying most_likely-found candidate rather than forcing weak coverage", () => {
+      const onlyPossible = provision({ foundBy: [provenance({ issueLikelihood: "possible", answerTargetIndex: 1 })] });
+      // No error, no fabricated source — packing proceeds via pass 2 only.
+      const packed = packSources([onlyPossible], { answerTargets: [{ index: 1, text: "target" }] });
+      expect(packed).toHaveLength(1);
+      expect(packed[0].reservedForAnswerTargetIndexes).toEqual([]);
+    });
+
+    it("reserves one representative per distinct target, up to maxSources", () => {
+      const t1 = provision({
+        legalProvisionId: "t1-best",
+        foundBy: [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 1, finalScore: 0.01 })],
+      });
+      const t2 = provision({
+        legalProvisionId: "t2-best",
+        foundBy: [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 2, finalScore: 0.01 })],
+      });
+      const packed = packSources([t1, t2], {
+        answerTargets: [
+          { index: 1, text: "target 1" },
+          { index: 2, text: "target 2" },
+        ],
+      });
+      expect(packed.map((s) => s.legalProvisionId).sort()).toEqual(["t1-best", "t2-best"]);
+    });
+
+    it("falls back to pure global-ranked packing when no answerTargets are supplied (backward compatible)", () => {
+      const packed = packSources([
+        provision({ legalProvisionId: "weak", foundBy: [provenance({ finalScore: 0.01 })] }),
+        provision({ legalProvisionId: "strong", foundBy: [provenance({ finalScore: 0.05 })] }),
+      ]);
+      expect(packed[0].legalProvisionId).toBe("strong");
+      expect(packed[0].reservedForAnswerTargetIndexes).toEqual([]);
+    });
+  });
+
+  describe("maxPackedCharacters (token-budget-aware pack size)", () => {
+    it("stops admitting further sources once the character budget is exhausted", () => {
+      const provisions = Array.from({ length: 5 }, (_, i) =>
+        provision({
+          legalProvisionId: `p${i}`,
+          citationLabel: `art. ${i}`,
+          text: "x".repeat(1000),
+          foundBy: [provenance({ finalScore: 5 - i })],
+        }),
+      );
+
+      const packed = packSources(provisions, { maxSources: 20, maxPackedCharacters: 2500 });
+      // 2 full sources (2000 chars) fit; the 3rd (3000 total) would exceed the 2500 budget.
+      expect(packed).toHaveLength(2);
+    });
+
+    it("always admits at least one source even if it alone exceeds the character budget", () => {
+      const huge = provision({ text: "x".repeat(50_000) });
+      const packed = packSources([huge], { maxPackedCharacters: 100 });
+      expect(packed).toHaveLength(1);
+    });
+
+    it("lets a later, shorter candidate still fit after an earlier long one is skipped by the budget", () => {
+      const long = provision({
+        legalProvisionId: "long",
+        text: "x".repeat(2000),
+        foundBy: [provenance({ finalScore: 0.05 })],
+      });
+      const short = provision({
+        legalProvisionId: "short",
+        text: "y".repeat(10),
+        foundBy: [provenance({ finalScore: 0.04 })],
+      });
+      const first = provision({
+        legalProvisionId: "first",
+        text: "z".repeat(50),
+        foundBy: [provenance({ finalScore: 0.06 })],
+      });
+
+      const packed = packSources([long, short, first], { maxPackedCharacters: 100 });
+      const ids = packed.map((s) => s.legalProvisionId);
+      expect(ids).toContain("first");
+      expect(ids).toContain("short");
+      expect(ids).not.toContain("long");
+    });
   });
 
   describe("provenCurrentAsOf (current-law-corpus provenance)", () => {

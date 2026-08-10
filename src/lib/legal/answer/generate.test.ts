@@ -30,6 +30,7 @@ const source: PackedSource = {
   currentnessStatus: "unproven",
   provenCurrentAsOf: null,
   sourceExpressionId: "ogl",
+  reservedForAnswerTargetIndexes: [],
 };
 
 const baseInput = {
@@ -126,7 +127,84 @@ describe("generateFinalAnswer", () => {
     expect(schema.additionalProperties).toBe(false);
     expect(schema.required).toEqual(["answer", "conclusions", "alternativePaths", "uncertainties", "clarificationQuestion"]);
     expect(schema.properties.conclusions.items.additionalProperties).toBe(false);
-    expect(schema.properties.conclusions.items.required).toEqual(["statement", "support"]);
+    expect(schema.properties.conclusions.items.required).toEqual(["statement", "support", "answerTargetIndex"]);
+  });
+
+  it("constrains answerTargetIndex to exactly 1..N when answerTargets are supplied, and to null-only when none are", async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(withContent(validPayload))
+      .mockResolvedValueOnce(withContent(validPayload));
+    await generateFinalAnswer(
+      {
+        ...baseInput,
+        answerTargets: [
+          { index: 1, text: "target one" },
+          { index: 2, text: "target two" },
+        ],
+      },
+      { apiKey: "test-key", fetchImpl },
+    );
+    const schemaWithTargets = JSON.parse(String(fetchImpl.mock.calls[0][1].body)).response_format.json_schema.schema;
+    const answerTargetIndexSchema = schemaWithTargets.properties.conclusions.items.properties.answerTargetIndex;
+    expect(answerTargetIndexSchema.anyOf).toEqual([{ type: "integer", enum: [1, 2] }, { type: "null" }]);
+
+    await generateFinalAnswer(baseInput, { apiKey: "test-key", fetchImpl });
+    const schemaWithoutTargets = JSON.parse(String(fetchImpl.mock.calls[1][1].body)).response_format.json_schema.schema;
+    expect(schemaWithoutTargets.properties.conclusions.items.properties.answerTargetIndex).toEqual({ type: "null" });
+  });
+
+  it("rejects a conclusion whose answerTargetIndex is out of range of the supplied answerTargets", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      withContent({
+        ...validPayload,
+        conclusions: [{ ...validPayload.conclusions[0], answerTargetIndex: 5 }],
+      }),
+    );
+
+    await expect(
+      generateFinalAnswer(
+        { ...baseInput, answerTargets: [{ index: 1, text: "only target" }] },
+        { apiKey: "test-key", fetchImpl, maxRetries: 0 },
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("accepts a conclusion with a null answerTargetIndex (general claim, not tied to one target)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      withContent({
+        ...validPayload,
+        conclusions: [{ ...validPayload.conclusions[0], answerTargetIndex: null }],
+      }),
+    );
+
+    const result = await generateFinalAnswer(
+      { ...baseInput, answerTargets: [{ index: 1, text: "only target" }] },
+      { apiKey: "test-key", fetchImpl },
+    );
+    expect(result.conclusions[0].answerTargetIndex).toBeNull();
+  });
+
+  it("includes the answerTargets block in the user message, in order, ahead of issue hypotheses", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
+    await generateFinalAnswer(
+      {
+        ...baseInput,
+        answerTargets: [
+          { index: 1, text: "jakie prawa ma producent" },
+          { index: 2, text: "przed czym chroni ustawa" },
+        ],
+      },
+      { apiKey: "test-key", fetchImpl },
+    );
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    const userMessage = body.messages.find((m: { role: string }) => m.role === "user").content as string;
+
+    expect(userMessage).toContain("jakie prawa ma producent");
+    expect(userMessage).toContain("przed czym chroni ustawa");
+    expect(userMessage.indexOf("CELE ODPOWIEDZI")).toBeLessThan(userMessage.indexOf("HIPOTEZY PRAWNE"));
   });
 
   it("H: fails closed when the model refuses to produce a structured response", async () => {

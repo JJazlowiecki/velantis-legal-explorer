@@ -7,9 +7,11 @@ import type { EmbedTextsFn } from "../search/embeddings";
 import { indexLegalSearchDocuments } from "../search/indexing";
 import type { DetectLegalIssuesFn } from "../issues/detect";
 import { LegalIssueInvestigationError } from "../issues/investigate";
-import type { LegalIssueDetectionResult } from "../issues/schema";
+import type { LegalIssueDetectionResult, LegalIssueLikelihood } from "../issues/schema";
 import { answerLegalProblem, LegalAnswerError } from "./answer";
+import { FinalAnswerGenerationError } from "./generate";
 import type { GenerateFinalAnswerFn, GenerateFinalAnswerInput } from "./generate";
+import { RecoveryGenerationError } from "./recovery";
 import type { GenerateRecoveryConclusionsFn } from "./recovery";
 import type { RawFinalAnswerResponse } from "./schema";
 import type { RunSkepticalVerificationFn } from "./skeptic";
@@ -150,10 +152,33 @@ describeDatabase("answerLegalProblem", () => {
     return { act, currentVersion, nonAuthoritativeVersion, unindexedVersion, alpha, beta, nonAuthProvision };
   }
 
-  function detectionWith(issues: LegalIssueDetectionResult["issues"]): DetectLegalIssuesFn {
+  /** Simplified fixture shape: a flat `retrievalQueries: string[]` (the pre-Phase-1 shape),
+   * adapted here to the current LegalIssueHypothesis contract so the ~50 call sites below
+   * (which mostly test verify/skeptic/recovery/caching behavior, not answerTarget planning
+   * itself) don't each need updating individually. Every query defaults to answerTargetIndex 1
+   * against a single implicit answer target unless overridden. */
+  interface SimpleIssueFixture {
+    label: string;
+    likelihood: LegalIssueLikelihood;
+    rationale: string;
+    retrievalQueries: string[];
+    answerTargetIndexes?: number[];
+  }
+
+  function detectionWith(
+    issues: SimpleIssueFixture[],
+    answerTargets: LegalIssueDetectionResult["answerTargets"] = [{ text: "cel testowy" }],
+  ): DetectLegalIssuesFn {
     const detection: LegalIssueDetectionResult = {
       summary: "Możliwy spór dotyczący wykonania umowy.",
-      issues,
+      answerTargets,
+      issues: issues.map((issue) => ({
+        label: issue.label,
+        likelihood: issue.likelihood,
+        rationale: issue.rationale,
+        answerTargetIndexes: issue.answerTargetIndexes ?? [1],
+        retrievalQueries: issue.retrievalQueries.map((query) => ({ query, answerTargetIndex: 1 })),
+      })),
     };
     return async () => detection;
   }
@@ -319,6 +344,181 @@ describeDatabase("answerLegalProblem", () => {
       authorityClass: "authoritative",
       currentnessStatus: "unproven",
       sourceExpressionId: "ogl",
+    });
+  });
+
+  describe("answerTargets / target coverage / debug trace (Phase 9-11, 13)", () => {
+    const twoTargets: LegalIssueDetectionResult["answerTargets"] = [
+      { text: "czy dłużnik odpowiada" },
+      { text: "czy przysługuje rękojmia" },
+    ];
+
+    it("computes verified coverage for a target with a matching verified conclusion, unsupported for one with none", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const result = await answerLegalProblem({
+        problemDescription: "firma remontowa źle zrobiła remont",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(
+          [
+            {
+              label: "nienależyte wykonanie zobowiązania",
+              likelihood: "most_likely",
+              rationale: "rationale",
+              retrievalQueries: ["KEYWORD_ALPHA"],
+              answerTargetIndexes: [1],
+            },
+          ],
+          twoTargets,
+        ),
+        generateFinalAnswer: groundedAnswer({
+          conclusions: [{ statement: "Dłużnik odpowiada.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 1 }],
+        }),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
+      });
+
+      expect(result.answerTargets).toHaveLength(2);
+      expect(result.targetCoverage).toEqual([
+        { index: 1, text: "czy dłużnik odpowiada", status: "verified" },
+        { index: 2, text: "czy przysługuje rękojmia", status: "unsupported" },
+      ]);
+    });
+
+    it("orders the final answer text with target-tagged conclusions first, in target order, ahead of untagged ones", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const result = await answerLegalProblem({
+        problemDescription: "firma remontowa źle zrobiła remont i są wady",
+        legalActVersionIds: [currentVersion.id],
+        limitPerQuery: 1,
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(
+          [
+            {
+              label: "issue A",
+              likelihood: "most_likely",
+              rationale: "r",
+              retrievalQueries: ["KEYWORD_ALPHA"],
+              answerTargetIndexes: [1],
+            },
+            {
+              label: "issue B",
+              likelihood: "most_likely",
+              rationale: "r",
+              retrievalQueries: ["KEYWORD_BETA"],
+              answerTargetIndexes: [2],
+            },
+          ],
+          twoTargets,
+        ),
+        generateFinalAnswer: groundedAnswer({
+          conclusions: [
+            { statement: "TARGET TWO STATEMENT", support: [{ sourceId: "SOURCE_2" }], answerTargetIndex: 2 },
+            { statement: "TARGET ONE STATEMENT", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 1 },
+            { statement: "UNTAGGED STATEMENT", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: null },
+          ],
+        }),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
+      });
+
+      const idxOne = result.answer.indexOf("TARGET ONE STATEMENT");
+      const idxTwo = result.answer.indexOf("TARGET TWO STATEMENT");
+      const idxUntagged = result.answer.indexOf("UNTAGGED STATEMENT");
+      expect(idxOne).toBeGreaterThanOrEqual(0);
+      expect(idxOne).toBeLessThan(idxTwo);
+      expect(idxTwo).toBeLessThan(idxUntagged);
+    });
+
+    it("adds an explicit note in the final answer text for an answerTarget that remains unsupported, without padding with peripheral content", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const result = await answerLegalProblem({
+        problemDescription: "firma remontowa źle zrobiła remont",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(
+          [
+            {
+              label: "issue",
+              likelihood: "most_likely",
+              rationale: "r",
+              retrievalQueries: ["KEYWORD_ALPHA"],
+              answerTargetIndexes: [1],
+            },
+          ],
+          twoTargets,
+        ),
+        generateFinalAnswer: groundedAnswer({
+          conclusions: [{ statement: "Dłużnik odpowiada.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 1 }],
+        }),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
+      });
+
+      expect(result.answer).toContain("czy przysługuje rękojmia");
+      expect(result.targetCoverage.find((t) => t.index === 2)?.status).toBe("unsupported");
+    });
+
+    it("leaves trace undefined by default (collectTrace not requested)", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const result = await answerLegalProblem({
+        problemDescription: "firma remontowa źle zrobiła remont",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "most_likely", rationale: "r", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
+      });
+
+      expect(result.trace).toBeUndefined();
+    });
+
+    it("collectTrace:true populates a structured trace assembled from data already computed by the normal pipeline (no extra model calls)", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const verifySpy = vi.fn(supportAllVerifier);
+      const skepticSpy = vi.fn(noLeapSkeptic);
+
+      const result = await answerLegalProblem({
+        problemDescription: "firma remontowa źle zrobiła remont",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "most_likely", rationale: "r", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: verifySpy,
+        runSkepticalVerification: skepticSpy,
+        collectTrace: true,
+      });
+
+      expect(result.trace).toBeDefined();
+      expect(result.trace?.issues).toHaveLength(1);
+      expect(result.trace?.packedSources.length).toBeGreaterThan(0);
+      expect(result.trace?.draftConclusions).toHaveLength(1);
+      expect(result.trace?.rawVerifyResults).toHaveLength(1);
+      expect(result.trace?.rawSkepticResults).toHaveLength(1);
+      expect(result.trace?.recoveryRan).toBe(false);
+      // Exactly one call each — collectTrace must never trigger a duplicate pass.
+      expect(verifySpy).toHaveBeenCalledTimes(1);
+      expect(skepticSpy).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1623,6 +1823,291 @@ describeDatabase("answerLegalProblem", () => {
       expect(result.status).toBe("insufficient_evidence");
       expect(result.conclusions).toEqual([]);
       expect(recoverySpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("recovery target-tagging + generation/recovery fail-closed (v4 hardening pass)", () => {
+    const twoTargets: LegalIssueDetectionResult["answerTargets"] = [
+      { text: "target one" },
+      { text: "target two" },
+    ];
+
+    it("B: recovery can answer multiple targets with distinct target indexes, both independently verified", async () => {
+      const { currentVersion, alpha, beta } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => {
+        const source1 = input.sources.find((s) => s.legalProvisionId === alpha.id) ?? input.sources[0];
+        const source2 = input.sources.find((s) => s.legalProvisionId === beta.id) ?? input.sources[0];
+        return {
+          conclusions: [
+            {
+              statement: "RECOVERY_teza dla celu pierwszego.",
+              support: [{ sourceId: source1.sourceId, excerpt: source1.text }],
+              answerTargetIndex: 1,
+            },
+            {
+              statement: "RECOVERY_teza dla celu drugiego.",
+              support: [{ sourceId: source2.sourceId, excerpt: source2.text }],
+              answerTargetIndex: 2,
+            },
+          ],
+          uncertainties: [],
+        };
+      };
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        limitPerQuery: 2,
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(
+          [
+            {
+              label: "issue A",
+              likelihood: "most_likely",
+              rationale: "r",
+              retrievalQueries: ["KEYWORD_ALPHA"],
+              answerTargetIndexes: [1],
+            },
+            {
+              label: "issue B",
+              likelihood: "most_likely",
+              rationale: "r",
+              retrievalQueries: ["KEYWORD_BETA"],
+              answerTargetIndexes: [2],
+            },
+          ],
+          twoTargets,
+        ),
+        generateFinalAnswer: async () => ({
+          answer: "",
+          conclusions: [],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification: noLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("answered");
+      expect(result.conclusions).toHaveLength(2);
+      expect(result.targetCoverage).toEqual([
+        { index: 1, text: "target one", status: "verified" },
+        { index: 2, text: "target two", status: "verified" },
+      ]);
+    });
+
+    it("E: a recovery conclusion's answerTargetIndex tag cannot rescue a claim the verifier rejects", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_twierdzenie oznaczone celem, ale nieustanowione przez źródło.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+            answerTargetIndex: 1,
+          },
+        ],
+        uncertainties: [],
+      });
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(
+          [
+            {
+              label: "issue",
+              likelihood: "most_likely",
+              rationale: "r",
+              retrievalQueries: ["KEYWORD_ALPHA"],
+              answerTargetIndexes: [1],
+            },
+          ],
+          twoTargets,
+        ),
+        generateFinalAnswer: async () => ({ answer: "", conclusions: [], alternativePaths: [], uncertainties: [] }),
+        verifyConclusionSupport: rejectAllVerifier,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      expect(result.targetCoverage).toEqual([
+        { index: 1, text: "target one", status: "unsupported" },
+        { index: 2, text: "target two", status: "unsupported" },
+      ]);
+    });
+
+    it("F: a structurally invalid normal-generation response degrades to insufficient_evidence instead of an uncaught error", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const generateFinalAnswer: GenerateFinalAnswerFn = async () => {
+        throw new FinalAnswerGenerationError(
+          "Model response did not match the expected final-answer schema: Array must contain at least 1 element(s)",
+          "INVALID_RESPONSE",
+        );
+      };
+      const recoverySpy = vi.fn(async () => ({ conclusions: [], uncertainties: [] }));
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer,
+        generateRecoveryConclusions: recoverySpy,
+        collectTrace: true,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      // recovery still gets an independent shot at the same packed sources
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+      expect(result.trace?.generationStructuralFailureReason).toContain("final-answer schema");
+    });
+
+    it("G: empty support on a normal-generation conclusion remains rejected by schema — never silently accepted (schema not loosened)", async () => {
+      // A real Zod rejection (not a hand-thrown fake) proves the schema itself, unmodified,
+      // still rejects this shape — this is what generate.ts's real buildRawFinalAnswerResponseSchema
+      // does when the model tries not to fabricate a citation.
+      const { buildRawFinalAnswerResponseSchema } = await import("./schema");
+      const schema = buildRawFinalAnswerResponseSchema(new Set(["SOURCE_1"]), 0);
+      const parsed = schema.safeParse({
+        answer: "x",
+        conclusions: [{ statement: "Twierdzenie bez źródła.", support: [] }],
+        alternativePaths: [],
+        uncertainties: [],
+      });
+      expect(parsed.success).toBe(false);
+    });
+
+    it("H: a structurally invalid recovery response also degrades to insufficient_evidence instead of an uncaught error", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy: GenerateRecoveryConclusionsFn = async () => {
+        throw new RecoveryGenerationError(
+          "Model response did not match the expected recovery schema: Array must contain at least 1 element(s)",
+          "INVALID_RESPONSE",
+        );
+      };
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: async () => ({ answer: "", conclusions: [], alternativePaths: [], uncertainties: [] }),
+        generateRecoveryConclusions: recoverySpy,
+        collectTrace: true,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      expect(result.trace?.recoveryStructuralFailureReason).toContain("recovery schema");
+    });
+
+    it("I: a genuine infrastructure failure from normal generation propagates as a thrown error, never becomes insufficient_evidence", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const generateFinalAnswer: GenerateFinalAnswerFn = async () => {
+        throw new FinalAnswerGenerationError("OpenAI final-answer request failed with status 503", "HTTP_ERROR", 503);
+      };
+
+      await expect(
+        answerLegalProblem({
+          problemDescription: "opis problemu",
+          legalActVersionIds: [currentVersion.id],
+          db,
+          embedTexts: fakeEmbed,
+          detectIssues: detectionWith([
+            { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+          ]),
+          generateFinalAnswer,
+        }),
+      ).rejects.toMatchObject({ code: "HTTP_ERROR", status: 503 });
+    });
+
+    it("I (CONFIG variant): a missing-API-key CONFIG failure from normal generation also propagates rather than becoming insufficient_evidence", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const generateFinalAnswer: GenerateFinalAnswerFn = async () => {
+        throw new FinalAnswerGenerationError("OPENAI_API_KEY is not configured", "CONFIG");
+      };
+
+      await expect(
+        answerLegalProblem({
+          problemDescription: "opis problemu",
+          legalActVersionIds: [currentVersion.id],
+          db,
+          embedTexts: fakeEmbed,
+          detectIssues: detectionWith([
+            { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+          ]),
+          generateFinalAnswer,
+        }),
+      ).rejects.toMatchObject({ code: "CONFIG" });
+    });
+
+    it("J: trace records the structural-failure reason and recovery invocation without any extra verify/skeptic calls beyond what the pipeline needs", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const generateFinalAnswer: GenerateFinalAnswerFn = async () => {
+        throw new FinalAnswerGenerationError("malformed model output", "INVALID_RESPONSE");
+      };
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_teza.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+            answerTargetIndex: null,
+          },
+        ],
+        uncertainties: [],
+      });
+      const verifySpy = vi.fn(supportAllVerifier);
+      const skepticSpy = vi.fn(noLeapSkeptic);
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer,
+        generateRecoveryConclusions: recoverySpy,
+        verifyConclusionSupport: verifySpy,
+        runSkepticalVerification: skepticSpy,
+        collectTrace: true,
+      });
+
+      expect(result.status).toBe("answered");
+      expect(result.trace?.generationStructuralFailureReason).toBe("malformed model output");
+      expect(result.trace?.recoveryRan).toBe(true);
+      expect(result.trace?.recoveryStructuralFailureReason).toBeNull();
+      // exactly one verify + one skeptic call — for the recovery conclusion only, since the
+      // normal draft never produced any conclusions to verify in the first place
+      expect(verifySpy).toHaveBeenCalledTimes(1);
+      expect(skepticSpy).toHaveBeenCalledTimes(1);
     });
   });
 });

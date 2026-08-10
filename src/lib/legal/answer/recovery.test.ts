@@ -30,6 +30,7 @@ const source: PackedSource = {
   currentnessStatus: "unproven",
   provenCurrentAsOf: null,
   sourceExpressionId: "ogl",
+  reservedForAnswerTargetIndexes: [],
 };
 
 const baseInput = {
@@ -239,6 +240,78 @@ describe("generateRecoveryConclusions", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("generateRecoveryConclusions answerTargetIndex (Defect 1 hardening)", () => {
+  it("A: accepts and returns a recovery conclusion tagged with a valid answerTargetIndex", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      withContent({
+        conclusions: [{ ...validPayload.conclusions[0], answerTargetIndex: 1 }],
+        uncertainties: [],
+      }),
+    );
+
+    const result = await generateRecoveryConclusions(
+      { ...baseInput, answerTargets: [{ index: 1, text: "target one" }] },
+      { apiKey: "test-key", fetchImpl },
+    );
+
+    expect(result.conclusions[0].answerTargetIndex).toBe(1);
+  });
+
+  it("C: accepts a recovery conclusion with a null answerTargetIndex (genuinely peripheral claim)", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      withContent({
+        conclusions: [{ ...validPayload.conclusions[0], answerTargetIndex: null }],
+        uncertainties: [],
+      }),
+    );
+
+    const result = await generateRecoveryConclusions(
+      { ...baseInput, answerTargets: [{ index: 1, text: "target one" }] },
+      { apiKey: "test-key", fetchImpl },
+    );
+
+    expect(result.conclusions[0].answerTargetIndex).toBeNull();
+  });
+
+  it("D: rejects a recovery conclusion whose answerTargetIndex is out of range of the supplied answerTargets", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      withContent({
+        conclusions: [{ ...validPayload.conclusions[0], answerTargetIndex: 7 }],
+        uncertainties: [],
+      }),
+    );
+
+    await expect(
+      generateRecoveryConclusions(
+        { ...baseInput, answerTargets: [{ index: 1, text: "only target" }] },
+        { apiKey: "test-key", fetchImpl, maxRetries: 0 },
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it("constrains answerTargetIndex to null-only when no answerTargets are supplied", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
+    await generateRecoveryConclusions(baseInput, { apiKey: "test-key", fetchImpl });
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const schema = JSON.parse(String(init.body)).response_format.json_schema.schema;
+    expect(schema.properties.conclusions.items.properties.answerTargetIndex).toEqual({ type: "null" });
+  });
+
+  it("includes the answerTargets block in the recovery user message", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(withContent(validPayload));
+    await generateRecoveryConclusions(
+      { ...baseInput, answerTargets: [{ index: 1, text: "jakie prawa ma producent" }] },
+      { apiKey: "test-key", fetchImpl },
+    );
+
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    const userMessage = body.messages.find((m: { role: string }) => m.role === "user").content as string;
+    expect(userMessage).toContain("jakie prawa ma producent");
   });
 });
 
