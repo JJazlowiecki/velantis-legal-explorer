@@ -52,8 +52,9 @@ ZASADA NADRZĘDNA — UGRUNTOWANIE W ŹRÓDŁACH:
 
 AUTORYTATYWNOŚĆ I AKTUALNOŚĆ ŹRÓDEŁ:
 - Źródło o klasie "non_authoritative" (np. tekst ujednolicony UJ) NIGDY nie może być opisane jako wiążące prawo — wyraźnie zaznacz to zastrzeżenie, jeśli z takiego źródła korzystasz.
-- Źródło o statusie aktualności "unproven" NIGDY nie może być opisane jako obecnie obowiązujące. Jeśli budujesz odpowiedź na takim źródle, DODAJ w treści odpowiedzi (answer) krótkie, jednoznaczne zastrzeżenie, że aktualność/obowiązywanie tego przepisu nie zostały potwierdzone (np. "aktualność tego przepisu nie została potwierdzona" lub podobne, naturalnym językiem — nie jako sztampowa formułka powtarzana bez związku z treścią).
-- Źródło typu "promulgated" (historyczne/pierwotne brzmienie) nie jest automatycznie aktualnym prawem — nie sugeruj, że jest, i nie pomijaj tego zastrzeżenia milczeniem.
+- Źródło, którego linia metadanych zawiera adnotację "aktualność potwierdzona na dzień DATA (zweryfikowany korpus aktualnego prawa)", MOŻE być traktowane jako zweryfikowane aktualne na dzień DATA — system już to potwierdził. To NIE jest jednak samodzielne stwierdzenie, że dany przepis jest "obowiązujący" niezależnie od tej weryfikacji — nie formułuj takiego twierdzenia mocniej, niż wynika to z samej adnotacji aktualności. W takim wypadku NIE dodawaj żadnego ogólnikowego zastrzeżenia, że aktualność tego przepisu nie została potwierdzona (bo została). Nie sugeruj jednak, że przepis jest aktualny bezterminowo albo na inny dzień niż wskazana DATA — jeśli to istotne, odnoś się wyłącznie do stanu na tę konkretną datę.
+- Źródło, którego linia metadanych zawiera adnotację "aktualność: unproven" (bez potwierdzonej daty), NIGDY nie może być opisane jako obecnie obowiązujące — niezależnie od tego, jak wygląda jego rodzaj wersji czy klasa autorytatywności. Jeśli budujesz odpowiedź na takim źródle, DODAJ w treści odpowiedzi (answer) krótkie, jednoznaczne zastrzeżenie, że aktualność/obowiązywanie tego przepisu nie zostały potwierdzone (np. "aktualność tego przepisu nie została potwierdzona" lub podobne, naturalnym językiem — nie jako sztampowa formułka powtarzana bez związku z treścią).
+- Źródło typu "promulgated" (historyczne/pierwotne brzmienie) bez potwierdzonej daty aktualności nie jest automatycznie aktualnym prawem — nie sugeruj, że jest, i nie pomijaj tego zastrzeżenia milczeniem.
 
 STYL ODPOWIEDZI (pole "answer", po polsku):
 - Jasny, bezpośredni język; zwięzła terminologia prawnicza tam, gdzie potrzebna.
@@ -157,10 +158,33 @@ function buildFinalAnswerJsonSchema(sourceIds: string[]) {
   };
 }
 
-function formatSourceForPrompt(source: PackedSource): string {
+/**
+ * The ONLY signal that may tell the model a source is currently binding law is
+ * `provenCurrentAsOf` — the run-scoped proof that this source's legalActVersionId is a member
+ * of the exact pinned CURRENT-mode corpus run, carrying that run's effectiveAsOf date (see
+ * PackedSource.provenCurrentAsOf / packing.ts). The immutable `currentnessStatus` DB field is
+ * deliberately never used to decide this: it stays "unproven" everywhere by design (see
+ * answer.ts), so basing the model's currentness framing on it would make every current-mode
+ * answer carry a false "currentness unconfirmed" caveat even when the corpus run has already
+ * verified it — this is the exact bug this function fixes. versionKind/authorityClass/
+ * sourceExpressionId/legalStateDate are never consulted here either, only provenCurrentAsOf.
+ *
+ * Wording is deliberately terminology-narrow: `provenCurrentAsOf` proves run-scoped
+ * CURRENTNESS (this version is a member of the verified current-law corpus as of a date), not
+ * the stronger per-provision claim that this exact provision is independently "obowiązująca".
+ * "aktualność potwierdzona na dzień DATA" states only what was actually proven.
+ */
+function formatSourceCurrentness(source: PackedSource): string {
+  if (source.provenCurrentAsOf) {
+    return `aktualność potwierdzona na dzień ${source.provenCurrentAsOf} (zweryfikowany korpus aktualnego prawa)`;
+  }
+  return source.currentnessStatus;
+}
+
+export function formatSourceForPrompt(source: PackedSource): string {
   const hierarchy = source.hierarchy.length > 0 ? source.hierarchy.join(" / ") : "(brak dodatkowego kontekstu)";
   return [
-    `${source.sourceId} [${source.citationLabel}; akt: ${source.actTitle}; wersja: ${source.versionKind}; klasa: ${source.authorityClass}; aktualność: ${source.currentnessStatus}]`,
+    `${source.sourceId} [${source.citationLabel}; akt: ${source.actTitle}; wersja: ${source.versionKind}; klasa: ${source.authorityClass}; aktualność: ${formatSourceCurrentness(source)}]`,
     `Kontekst: ${hierarchy}`,
     `Treść: ${source.text}`,
   ].join("\n");
