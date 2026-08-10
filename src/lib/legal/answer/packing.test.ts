@@ -36,6 +36,55 @@ function provision(overrides: Partial<DeduplicatedRetrievedProvision> = {}): Ded
   };
 }
 
+describe("packSources default maxSources (experiment/source-pack-count-16)", () => {
+  function manyProvisions(count: number, textLength = 50): DeduplicatedRetrievedProvision[] {
+    return Array.from({ length: count }, (_, i) =>
+      provision({
+        legalProvisionId: `p${i}`,
+        citationLabel: `art. ${i}`,
+        text: "x".repeat(textLength),
+        foundBy: [provenance({ finalScore: count - i })],
+      }),
+    );
+  }
+
+  it("packs up to 16 sources by default when the character budget allows", () => {
+    const packed = packSources(manyProvisions(20));
+    expect(packed).toHaveLength(16);
+  });
+
+  it("includes source #16 when the character budget still has room", () => {
+    const packed = packSources(manyProvisions(20));
+    expect(packed.map((s) => s.legalProvisionId)).toContain("p15");
+  });
+
+  it("excludes source #17 by the count limit alone, even with ample character budget left", () => {
+    const packed = packSources(manyProvisions(20), { maxPackedCharacters: 1_000_000 });
+    expect(packed).toHaveLength(16);
+    expect(packed.map((s) => s.legalProvisionId)).not.toContain("p16");
+  });
+
+  it("still stops at the unchanged 12,000-character budget before reaching 16 sources", () => {
+    const packed = packSources(manyProvisions(20, 1000));
+    expect(packed.length).toBeLessThan(16);
+    const totalChars = packed.reduce((sum, s) => sum + s.text.length, 0);
+    expect(totalChars).toBeLessThanOrEqual(12_000);
+  });
+
+  it("retains the exact-citation-matched source regardless of the larger default pack size", () => {
+    const provisions = [
+      ...manyProvisions(20),
+      provision({
+        legalProvisionId: "exact",
+        citationLabel: "art. 999",
+        foundBy: [provenance({ finalScore: 0.001, isExactCitationMatch: true })],
+      }),
+    ];
+    const packed = packSources(provisions);
+    expect(packed[0].legalProvisionId).toBe("exact");
+  });
+});
+
 describe("packSources", () => {
   it("assigns stable SOURCE_1, SOURCE_2, ... identifiers", () => {
     const packed = packSources([

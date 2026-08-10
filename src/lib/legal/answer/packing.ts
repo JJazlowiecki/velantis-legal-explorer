@@ -52,7 +52,16 @@ export interface PackSourcesOptions {
   currentCorpusContext?: CurrentCorpusPackingContext;
 }
 
-const DEFAULT_MAX_SOURCES = 12;
+/**
+ * Raised 12 -> 16 (experiment/source-pack-count-16): packed character usage was consistently
+ * far below maxPackedCharacters (~15% of the 12,000-char budget) while packed source count sat
+ * at the 12-source ceiling on nearly every real run, so source COUNT — not character budget —
+ * was the binding constraint discarding otherwise-qualifying candidates (e.g. art. 6 ust. 1,
+ * database-rights regression) purely for being 1-4 ranks past the cutoff. maxPackedCharacters
+ * is intentionally left unchanged: this widens the count ceiling only, it does not relax the
+ * token-budget proxy.
+ */
+const DEFAULT_MAX_SOURCES = 16;
 const DEFAULT_MAX_PACKED_CHARACTERS = 12_000;
 
 function dedupeByProvisionId(provisions: DeduplicatedRetrievedProvision[]): DeduplicatedRetrievedProvision[] {
