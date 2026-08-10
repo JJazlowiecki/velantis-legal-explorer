@@ -405,3 +405,53 @@ export const currentLawCorpusEntries = pgTable(
 		uniqueIndex("current_law_corpus_entries_run_act_uidx").on(table.runId, table.legalActId),
 	],
 );
+
+/**
+ * Conservative EXACT-MATCH cache for already fully verified `answered` legal answers, scoped
+ * to CURRENT corpus mode only (see feature/current-corpus-runtime, src/lib/explorer/cache/).
+ * Never a semantic/fuzzy cache. Identity is `(questionHash, corpusRunId, pipelineVersion)`:
+ * the immutable corpus run is the primary legal-state boundary (never effectiveAsOf alone —
+ * two different runs could share an effectiveAsOf), and pipelineVersion lets a material
+ * retrieval/answer/verifier change invalidate old entries by bumping a constant, without ever
+ * deleting them (see src/lib/legal/answer/pipeline-version.ts). `rulesetVersion`/
+ * `effectiveAsOf`/`corpusSelectionHash` are redundant with corpusRunId by construction (a run's
+ * own fields never change after creation) but are stored and RE-VALIDATED at lookup time as
+ * defense in depth — a matching row is never trusted on identity alone. The raw user question
+ * is deliberately NOT stored here (it belongs in explorer_history_entries); only its hash.
+ * `answerSnapshot` is the exact same Zod-validated `ExplorerAnswerView` shape used by History
+ * (see explorerHistorySnapshotSchema) — this is not a second, looser answer format.
+ */
+export const verifiedLegalAnswerCache = pgTable(
+	"verified_legal_answer_cache",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		questionHash: text("question_hash").notNull(),
+		// onDelete: "restrict" — matches this repo's consistent conservative policy for every FK
+		// into an immutable audit table (see current_law_corpus_entries.legalActId,
+		// explorer_history_entries.corpusRunId): a corpus run must never be silently deleted out
+		// from under provenance that still cites it, cache rows included.
+		corpusRunId: uuid("corpus_run_id")
+			.notNull()
+			.references(() => currentLawCorpusRuns.id, { onDelete: "restrict" }),
+		rulesetVersion: text("ruleset_version").notNull(),
+		effectiveAsOf: date("effective_as_of").notNull(),
+		corpusSelectionHash: text("corpus_selection_hash").notNull(),
+		pipelineVersion: text("pipeline_version").notNull(),
+		answerSnapshot: jsonb("answer_snapshot").notNull(),
+		/** Deduplicated legalActVersionIds actually cited in the cached answer — re-validated at lookup time against the freshly resolved runtime-ready corpus set. */
+		sourceVersionIds: jsonb("source_version_ids").notNull(),
+		/** Deterministic hash of the cited source pack's identity/content — auditability only, never itself part of hit validation. */
+		sourcePackHash: text("source_pack_hash"),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		lastHitAt: timestamp("last_hit_at", { withTimezone: true }).defaultNow().notNull(),
+		hitCount: integer("hit_count").notNull().default(0),
+	},
+	(table) => [
+		uniqueIndex("verified_legal_answer_cache_identity_uidx").on(
+			table.questionHash,
+			table.corpusRunId,
+			table.pipelineVersion,
+		),
+		index("verified_legal_answer_cache_corpus_run_id_idx").on(table.corpusRunId),
+	],
+);
