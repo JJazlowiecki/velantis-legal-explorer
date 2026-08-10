@@ -35,6 +35,7 @@ function packedSource(overrides: Partial<PackedSource> = {}): PackedSource {
     currentnessStatus: "unproven",
     provenCurrentAsOf: null,
     sourceExpressionId: "ogl",
+    reservedForAnswerTargetIndexes: [],
     ...overrides,
   };
 }
@@ -45,6 +46,8 @@ function baseResult(overrides: Partial<LegalAnswerResult> = {}): LegalAnswerResu
     problemDescription: "opis problemu",
     legalActVersionIds: ["v1"],
     answer: "Odpowiedź.",
+    answerTargets: [],
+    targetCoverage: [],
     conclusions: [],
     alternativePaths: [],
     uncertainties: [],
@@ -77,7 +80,7 @@ describe("toExplorerAnswerView", () => {
 
     const view = toExplorerAnswerView(
       baseResult({
-        conclusions: [{ statement: "Teza.", support: [sourceRef({ legalProvisionId: "cited", citationLabel: "art. 471" })] }],
+        conclusions: [{ statement: "Teza.", support: [sourceRef({ legalProvisionId: "cited", citationLabel: "art. 471" })], answerTargetIndex: null }],
         sources: [cited, uncited],
       }),
     );
@@ -115,7 +118,7 @@ describe("toExplorerAnswerView", () => {
 
     const view = toExplorerAnswerView(
       baseResult({
-        conclusions: [{ statement: "Teza.", support: [sourceRef({ legalProvisionId: "p-non-auth", authorityClass: "non_authoritative" })] }],
+        conclusions: [{ statement: "Teza.", support: [sourceRef({ legalProvisionId: "p-non-auth", authorityClass: "non_authoritative" })], answerTargetIndex: null }],
         sources: [nonAuthoritative],
       }),
     );
@@ -148,6 +151,7 @@ describe("toExplorerAnswerView", () => {
                 provenCurrentAsOf: null,
               }),
             ],
+            answerTargetIndex: null,
           },
         ],
         sources: [stillUnproven],
@@ -179,6 +183,7 @@ describe("toExplorerAnswerView", () => {
                 provenCurrentAsOf: "2026-08-09",
               }),
             ],
+            answerTargetIndex: null,
           },
         ],
         sources: [clean],
@@ -193,7 +198,7 @@ describe("toExplorerAnswerView", () => {
   it("never exposes internal implementation fields (sourceId, legalProvisionId, versionKind, etc.) on cited sources", () => {
     const view = toExplorerAnswerView(
       baseResult({
-        conclusions: [{ statement: "Teza.", support: [sourceRef()] }],
+        conclusions: [{ statement: "Teza.", support: [sourceRef()], answerTargetIndex: null }],
         sources: [packedSource()],
       }),
     );
@@ -207,7 +212,7 @@ describe("toExplorerAnswerView", () => {
   it("maps conclusions and alternative paths to their citation labels only (no internal SOURCE_X ids)", () => {
     const view = toExplorerAnswerView(
       baseResult({
-        conclusions: [{ statement: "Dłużnik odpowiada.", support: [sourceRef({ citationLabel: "art. 471" })] }],
+        conclusions: [{ statement: "Dłużnik odpowiada.", support: [sourceRef({ citationLabel: "art. 471" })], answerTargetIndex: null }],
         alternativePaths: [{ issueLabel: "kwestia", explanation: "wyjaśnienie", support: [] }],
         sources: [packedSource({ citationLabel: "art. 471" })],
       }),

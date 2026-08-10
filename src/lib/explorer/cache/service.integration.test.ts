@@ -66,11 +66,13 @@ function answeredResult(overrides: Partial<LegalAnswerResult> = {}): LegalAnswer
 		problemDescription: QUESTION,
 		legalActVersionIds: [VERSION_A],
 		answer: "Na podstawie przepisów: kandydat musi mieć pełną zdolność do czynności prawnych.",
-		conclusions: [{ statement: "Kandydat musi mieć pełną zdolność do czynności prawnych.", support: [sourceRef()] }],
+		conclusions: [{ statement: "Kandydat musi mieć pełną zdolność do czynności prawnych.", support: [sourceRef()], answerTargetIndex: null }],
 		alternativePaths: [],
 		uncertainties: [],
 		clarificationQuestion: null,
 		sources: [],
+		answerTargets: [],
+		targetCoverage: [],
 		...overrides,
 	};
 }
@@ -172,7 +174,7 @@ describeDatabase("verified legal answer cache", () => {
 			const run = await insertRun();
 			const corpus = corpusFor(run);
 			const result = answeredResult({
-				conclusions: [{ statement: "Teza.", support: [sourceRef({ provenCurrentAsOf: null })] }],
+				conclusions: [{ statement: "Teza.", support: [sourceRef({ provenCurrentAsOf: null })], answerTargetIndex: null }],
 			});
 
 			await recordVerifiedAnswer({ db, question: QUESTION, corpus, result, view: viewFor(result) });
@@ -186,7 +188,7 @@ describeDatabase("verified legal answer cache", () => {
 			const run = await insertRun();
 			const corpus = corpusFor(run, [VERSION_A]); // resolved scope does NOT include VERSION_B
 			const result = answeredResult({
-				conclusions: [{ statement: "Teza.", support: [sourceRef({ legalActVersionId: VERSION_B })] }],
+				conclusions: [{ statement: "Teza.", support: [sourceRef({ legalActVersionId: VERSION_B })], answerTargetIndex: null }],
 			});
 
 			await recordVerifiedAnswer({ db, question: QUESTION, corpus, result, view: viewFor(result) });

@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { checkAnswerTargetIndexInRange } from "../issues/schema";
+
 /**
  * The model must cite sources only by the SOURCE_X identifiers the application
  * assigned when packing retrieval evidence — never invent article numbers,
@@ -16,6 +18,14 @@ export const finalAnswerConclusionSchema = z.object({
   statement: z.string().min(1),
   /** Every conclusion must be grounded in at least one supplied source — never empty. */
   support: z.array(finalAnswerSourceReferenceSchema).min(1),
+  /**
+   * 1-based index into the request's answerTargets (issues/schema.ts), or null when this
+   * conclusion is genuinely general/not tied to one specific requested aspect (Phase 10:
+   * claim/target traceability). Purely descriptive metadata used by answer.ts to order/label
+   * the final answer around what the user actually asked — verify.ts/skeptic.ts never read or
+   * gate on this field ("need not trust this tag").
+   */
+  answerTargetIndex: z.number().int().min(1).nullable().optional(),
 });
 
 export type FinalAnswerConclusion = z.infer<typeof finalAnswerConclusionSchema>;
@@ -44,9 +54,11 @@ export type RawFinalAnswerResponse = z.infer<typeof rawFinalAnswerResponseSchema
  * Builds a request-scoped schema that additionally rejects any sourceId not present
  * in `validSourceIds` — the citation-integrity boundary. The base shape alone cannot
  * express this because the valid set differs per call (it's the sources actually packed
- * for that request).
+ * for that request). Also range-checks every conclusion's `answerTargetIndex` against
+ * `answerTargetCount` (0 when the request had no answerTargets at all), reusing the exact
+ * cross-field-index-range pattern from issues/schema.ts's own answerTargetIndex validation.
  */
-export function buildRawFinalAnswerResponseSchema(validSourceIds: ReadonlySet<string>) {
+export function buildRawFinalAnswerResponseSchema(validSourceIds: ReadonlySet<string>, answerTargetCount = 0) {
   return rawFinalAnswerResponseSchema.superRefine((value, ctx) => {
     const checkRefs = (
       support: FinalAnswerSourceReference[],
@@ -63,7 +75,14 @@ export function buildRawFinalAnswerResponseSchema(validSourceIds: ReadonlySet<st
       });
     };
 
-    value.conclusions.forEach((conclusion, index) => checkRefs(conclusion.support, ["conclusions", index, "support"]));
+    value.conclusions.forEach((conclusion, index) => {
+      checkRefs(conclusion.support, ["conclusions", index, "support"]);
+      checkAnswerTargetIndexInRange(ctx, conclusion.answerTargetIndex, answerTargetCount, [
+        "conclusions",
+        index,
+        "answerTargetIndex",
+      ]);
+    });
     value.alternativePaths.forEach((path, index) => checkRefs(path.support, ["alternativePaths", index, "support"]));
   });
 }

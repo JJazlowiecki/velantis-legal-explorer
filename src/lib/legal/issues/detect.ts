@@ -30,6 +30,19 @@ const ISSUE_DETECTION_JSON_SCHEMA = {
   additionalProperties: false,
   properties: {
     summary: { type: "string" },
+    // 1-based positions in this array are referenced by answerTargetIndex below. The strict
+    // schema cannot express "index must be <= answerTargets.length" (no cross-field bound) —
+    // legalIssueDetectionResultSchema's superRefine is the enforcement layer, same as the
+    // existing >=1-retrievalQuery constraint below.
+    answerTargets: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: { text: { type: "string" } },
+        required: ["text"],
+      },
+    },
     issues: {
       type: "array",
       items: {
@@ -39,16 +52,28 @@ const ISSUE_DETECTION_JSON_SCHEMA = {
           label: { type: "string" },
           likelihood: { type: "string", enum: ["most_likely", "possible", "needs_more_information"] },
           rationale: { type: "string" },
-          retrievalQueries: { type: "array", items: { type: "string" } },
+          answerTargetIndexes: { type: "array", items: { type: "integer" } },
+          retrievalQueries: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                query: { type: "string" },
+                answerTargetIndex: { type: "integer" },
+              },
+              required: ["query", "answerTargetIndex"],
+            },
+          },
         },
-        required: ["label", "likelihood", "rationale", "retrievalQueries"],
+        required: ["label", "likelihood", "rationale", "answerTargetIndexes", "retrievalQueries"],
       },
     },
     // Strict mode requires every property in `required`; modeled as nullable to express
     // "optional" (null = not asked), normalized away before Zod parsing.
     clarificationQuestion: { type: ["string", "null"] },
   },
-  required: ["summary", "issues", "clarificationQuestion"],
+  required: ["summary", "answerTargets", "issues", "clarificationQuestion"],
 } as const;
 
 const DEFAULT_MODEL = "gpt-4o-mini";
@@ -78,15 +103,32 @@ const SYSTEM_PROMPT = `Jesteś asystentem prawnym pomagającym zidentyfikować m
 
 Twoim zadaniem NIE jest udzielenie porady prawnej ani ostatecznej odpowiedzi. Generujesz WYŁĄCZNIE hipotezy do dalszego wyszukiwania przepisów — nie są to ustalone wnioski prawne.
 
-Zasady:
+Pole "summary" jest ZAWSZE WYMAGANE i NIGDY nie może być puste — niezależnie od tego, czy issues jest puste czy nie, podaj zawsze 1-2 zdania streszczające, czego dotyczy opisany problem (lub, dla treści niezwiązanych z prawem, dlaczego issues jest puste).
+
+KROK 1 — answerTargets (czego DOKŁADNIE użytkownik oczekuje w odpowiedzi):
+- Zanim wygenerujesz zagadnienia prawne, wypisz od 1 do 4 zwięzłych, sformułowanych własnymi słowami użytkownika "celów odpowiedzi" (answerTargets) — konkretnych aspektów, o które użytkownik faktycznie pyta.
+- Przykład dla "Jakie prawa przysługują producentowi bazy danych i przed czym chroni go ustawa?": ["jakie prawa ma producent bazy danych", "przed jakimi działaniami ustawa go chroni"].
+- NIE twórz answerTargets dla tematów, o które użytkownik nie pytał (np. nie dodawaj "czy dane są chronione RODO", jeśli pytanie tego nie dotyczy).
+- Jeśli issues jest puste (patrz niżej), answerTargets też pozostaw pustą tablicą.
+
+KROK 2 — issues (hipotezy prawne):
 - Zwróć od 0 do 4 prawdopodobnych zagadnień prawnych (issues) mogących dotyczyć opisanej sytuacji.
 - Jeśli opis NIE dotyczy żadnego zagadnienia prawnego (np. pytanie o pogodę, prośba o wiersz, obliczenie matematyczne, pytanie techniczne niezwiązane z prawem, polecenie niezwiązane z prawem) — zwróć PUSTĄ tablicę issues i krótko wyjaśnij to w polu summary. NIGDY nie wymyślaj sztucznego zagadnienia prawnego tylko po to, by tablica issues nie była pusta.
-- Nie narzucaj jednej interpretacji, jeśli możliwych jest kilka — zachowaj wiele wiarygodnych ścieżek.
+- KAŻDE issue musi realnie służyć odpowiedzi na co najmniej jeden answerTarget (answerTargetIndexes) — nigdy nie twórz zagadnienia, które nie odpowiada na żaden z celów użytkownika.
+- Zagadnienie "most_likely" musi wprost i bezpośrednio adresować to, o co użytkownik pyta.
+- Zagadnienie "possible" dodawaj TYLKO gdy jest materialnie prawdopodobne ORAZ faktycznie potrzebne, by odpowiedzieć na jakiś answerTarget. NIE dodawaj sąsiedniej dziedziny prawa tylko dlatego, że bywa ona kojarzona z tym tematem (np. dla pytania o ochronę baz danych NIE dodawaj automatycznie "prawo autorskie" ani "RODO" — dodaj je tylko, jeśli treść pytania rzeczywiście na to wskazuje).
+- Nie narzucaj jednej interpretacji, jeśli możliwych jest kilka — zachowaj wiele wiarygodnych ścieżek, ale każda musi być realnie uzasadniona treścią pytania, nie tylko tematycznym skojarzeniem.
 - Każde zagadnienie ma jakościowy poziom prawdopodobieństwa: "most_likely", "possible" lub "needs_more_information". Nigdy nie podawaj liczbowego procentu pewności.
-- Dla każdego zagadnienia podaj krótkie uzasadnienie (rationale) i od 1 do 3 zwięzłych zapytań wyszukiwania (retrievalQueries) w języku polskim, przydatnych do wyszukania odpowiednich przepisów.
+- Dla każdego zagadnienia podaj krótkie uzasadnienie (rationale).
+
+KROK 3 — retrievalQueries (zapytania wyszukiwania):
+- Każde zapytanie to obiekt {"query": string, "answerTargetIndex": number} — answerTargetIndex wskazuje, na który answerTarget (1-based) to zapytanie ma odpowiedzieć.
+- Dla zagadnienia "most_likely": do 3 zapytań NA answerTarget, w tym co najmniej jedno próbujące trafić w rzeczywistą normę prawną (np. "wyłączne prawo producenta pobierania danych i wtórnego wykorzystania"), nie tylko nazwę aktu prawnego (unikaj samych fraz typu "ustawa o X" czy "X w Polsce" jako jedynego zapytania).
+- Dla zagadnienia "possible": zwykle 1 zapytanie na obsługiwany answerTarget.
+- Nie mnóż zapytań ponad potrzebę.
 - Zadaj pytanie doprecyzowujące (clarificationQuestion) TYLKO jeśli brakująca informacja mogłaby zmienić właściwą podstawę prawną. W przeciwnym razie pomiń to pole.
 - Odpowiedz WYŁĄCZNIE poprawnym obiektem JSON, bez żadnego dodatkowego tekstu, w formacie:
-{"summary": string, "issues": [{"label": string, "likelihood": "most_likely"|"possible"|"needs_more_information", "rationale": string, "retrievalQueries": string[]}], "clarificationQuestion"?: string}`;
+{"summary": string, "answerTargets": [{"text": string}], "issues": [{"label": string, "likelihood": "most_likely"|"possible"|"needs_more_information", "rationale": string, "answerTargetIndexes": number[], "retrievalQueries": [{"query": string, "answerTargetIndex": number}]}], "clarificationQuestion"?: string}`;
 
 export interface DetectLegalIssuesOptions {
   apiKey?: string;

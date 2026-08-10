@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { AnswerTargetView } from "../issues/investigate";
 import type { PackedSource } from "./packing";
 import { buildRawRecoveryResponseSchema, type RawRecoveryResponse } from "./recovery-schema";
 
@@ -56,18 +57,24 @@ Z dostarczonych źródeł (SOURCE_X) zidentyfikuj WYŁĄCZNIE te twierdzenia pra
 
 Jeżeli żadne źródło nie ustanawia wprost żadnego twierdzenia istotnego dla pytania — zwróć PUSTĄ listę conclusions. To jest w pełni poprawny, oczekiwany wynik w wielu przypadkach. NIE naciągaj słabo popartych twierdzeń tylko po to, aby lista nie była pusta — puste conclusions są zawsze lepsze niż niepoparte twierdzenie.
 
+CELE ODPOWIEDZI (answerTargets): otrzymasz listę konkretnych, requested aspektów pytania użytkownika. Szukaj w źródłach W PIERWSZEJ KOLEJNOŚCI dowodu odpowiadającego na te cele. Jeśli conclusion bezpośrednio i substantywnie odpowiada na jeden z nich, ustaw jego answerTargetIndex (1-based) na ten cel. NIE przypisuj answerTargetIndex "na siłę" — jeśli twierdzenie jedynie luźno dotyka tematu celu, ale go substantywnie nie rozstrzyga, zostaw answerTargetIndex jako null. NIGDY nie formułuj twierdzenia wyłącznie po to, by "obsłużyć" jakiś answerTarget — reguła z KROKU wyżej (tylko to, co źródło wprost ustanawia) obowiązuje bezwzględnie, niezależnie od tego, czy dana teza pasuje do jakiegoś celu. Nie zgłaszaj też ochoczo faktów pobocznych niezwiązanych z żadnym celem tylko dlatego, że są łatwe do zweryfikowania.
+
 Dla KAŻDEGO conclusion podaj:
 - statement: dokładna, wąska treść twierdzenia (nie szersza niż to, co źródło faktycznie ustanawia),
-- support: jeden lub więcej wpisów {"sourceId": "SOURCE_X", "excerpt": "..."}, gdzie excerpt jest DOSŁOWNYM (verbatim) cytatem z tekstu wskazanego źródła — NIE WOLNO parafrazować, skracać treściowo ani rekonstruować z pamięci.
+- support: jeden lub więcej wpisów {"sourceId": "SOURCE_X", "excerpt": "..."}, gdzie excerpt jest DOSŁOWNYM (verbatim) cytatem z tekstu wskazanego źródła — NIE WOLNO parafrazować, skracać treściowo ani rekonstruować z pamięci,
+- answerTargetIndex: 1-based indeks do answerTargets, którego conclusion substantywnie dotyczy, albo null.
 
 Nie generuj gotowej prozy odpowiedzi dla użytkownika — wyłącznie strukturalne twierdzenia i (opcjonalnie) niepewności.
 
 Odpowiedz WYŁĄCZNIE poprawnym obiektem JSON w formacie:
-{"conclusions": [{"statement": string, "support": [{"sourceId": "SOURCE_X", "excerpt": string}]}], "uncertainties": string[]}`;
+{"conclusions": [{"statement": string, "support": [{"sourceId": "SOURCE_X", "excerpt": string}], "answerTargetIndex": number|null}], "uncertainties": string[]}`;
 
 export interface GenerateRecoveryConclusionsInput {
   problemDescription: string;
   sources: PackedSource[];
+  /** Same request-scoped answerTargets as normal generation (issues/schema.ts) — empty for a
+   * non-legal problem or when detection produced none. */
+  answerTargets?: AnswerTargetView[];
 }
 
 export interface GenerateRecoveryConclusionsOptions {
@@ -100,8 +107,18 @@ function formatSourceForPrompt(source: PackedSource): string {
 }
 
 function buildUserMessage(input: GenerateRecoveryConclusionsInput): string {
+  const answerTargets = input.answerTargets ?? [];
+  const answerTargetsBlock =
+    answerTargets.length > 0
+      ? answerTargets.map((target) => `${target.index}. ${target.text}`).join("\n")
+      : "(brak wyodrębnionych celów — szukaj dowodu istotnego dla pytania ogólnie)";
+
   const sourcesBlock = input.sources.map(formatSourceForPrompt).join("\n\n");
-  return [`PYTANIE UŻYTKOWNIKA:\n${input.problemDescription}`, `ŹRÓDŁA:\n${sourcesBlock}`].join("\n\n");
+  return [
+    `PYTANIE UŻYTKOWNIKA:\n${input.problemDescription}`,
+    `CELE ODPOWIEDZI (answerTargets):\n${answerTargetsBlock}`,
+    `ŹRÓDŁA:\n${sourcesBlock}`,
+  ].join("\n\n");
 }
 
 /**
@@ -109,7 +126,16 @@ function buildUserMessage(input: GenerateRecoveryConclusionsInput): string {
  * `support.sourceId` to exactly the SOURCE_X identifiers supplied to this recovery call —
  * the same mechanism as generate.ts's buildFinalAnswerJsonSchema.
  */
-function buildRecoveryJsonSchema(sourceIds: string[]) {
+function buildRecoveryJsonSchema(sourceIds: string[], allowedTargetIndexes: number[]) {
+  // Same nullable-enum "anyOf" pattern as generate.ts's buildFinalAnswerJsonSchema — no
+  // second target model, no new strict-schema idiom. Enumerates the actual allowed indexes
+  // (not 1..count) so a partial/subset recovery call (Part 5) still only ever offers the
+  // model the real, un-renumbered target indexes it was scoped to.
+  const answerTargetIndexSchema =
+    allowedTargetIndexes.length > 0
+      ? { anyOf: [{ type: "integer", enum: allowedTargetIndexes }, { type: "null" }] }
+      : { type: "null" };
+
   return {
     type: "object",
     additionalProperties: false,
@@ -133,8 +159,9 @@ function buildRecoveryJsonSchema(sourceIds: string[]) {
                 required: ["sourceId", "excerpt"],
               },
             },
+            answerTargetIndex: answerTargetIndexSchema,
           },
-          required: ["statement", "support"],
+          required: ["statement", "support", "answerTargetIndex"],
         },
       },
       uncertainties: { type: "array", items: { type: "string" } },
@@ -172,8 +199,9 @@ export async function generateRecoveryConclusions(
 
   const sourceIds = input.sources.map((source) => source.sourceId);
   const validSourceIds = new Set(sourceIds);
-  const responseSchema = buildRawRecoveryResponseSchema(validSourceIds);
-  const jsonSchema = buildRecoveryJsonSchema(sourceIds);
+  const allowedTargetIndexes = (input.answerTargets ?? []).map((target) => target.index);
+  const responseSchema = buildRawRecoveryResponseSchema(validSourceIds, new Set(allowedTargetIndexes));
+  const jsonSchema = buildRecoveryJsonSchema(sourceIds, allowedTargetIndexes);
   const userMessage = buildUserMessage(input);
 
   for (let attempt = 0; ; attempt += 1) {
