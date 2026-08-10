@@ -14,7 +14,9 @@ import type { GenerateFinalAnswerFn, GenerateFinalAnswerInput } from "./generate
 import { RecoveryGenerationError } from "./recovery";
 import type { GenerateRecoveryConclusionsFn } from "./recovery";
 import type { RawFinalAnswerResponse } from "./schema";
+import { SkepticalVerificationError } from "./skeptic";
 import type { RunSkepticalVerificationFn } from "./skeptic";
+import { ConclusionVerificationError } from "./verify";
 import type { VerifyConclusionSupportFn } from "./verify";
 
 const testDatabase = createTestDatabase();
@@ -172,13 +174,19 @@ describeDatabase("answerLegalProblem", () => {
     const detection: LegalIssueDetectionResult = {
       summary: "Możliwy spór dotyczący wykonania umowy.",
       answerTargets,
-      issues: issues.map((issue) => ({
-        label: issue.label,
-        likelihood: issue.likelihood,
-        rationale: issue.rationale,
-        answerTargetIndexes: issue.answerTargetIndexes ?? [1],
-        retrievalQueries: issue.retrievalQueries.map((query) => ({ query, answerTargetIndex: 1 })),
-      })),
+      issues: issues.map((issue) => {
+        const answerTargetIndexes = issue.answerTargetIndexes ?? [1];
+        // Each query defaults to the issue's OWN first answerTarget — matches every existing
+        // single-target fixture (still 1) while correctly tagging multi-target issues (Part 5
+        // per-target recovery tests) instead of silently collapsing every query onto target 1.
+        return {
+          label: issue.label,
+          likelihood: issue.likelihood,
+          rationale: issue.rationale,
+          answerTargetIndexes,
+          retrievalQueries: issue.retrievalQueries.map((query) => ({ query, answerTargetIndex: answerTargetIndexes[0] })),
+        };
+      }),
     };
     return async () => detection;
   }
@@ -2108,6 +2116,494 @@ describeDatabase("answerLegalProblem", () => {
       // normal draft never produced any conclusions to verify in the first place
       expect(verifySpy).toHaveBeenCalledTimes(1);
       expect(skepticSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("per-target bounded recovery (Part 5/6 hardening)", () => {
+    const twoTargets: LegalIssueDetectionResult["answerTargets"] = [
+      { text: "target one" },
+      { text: "target two" },
+    ];
+    const twoIssuesOneTargetEach = [
+      {
+        label: "issue A",
+        likelihood: "most_likely" as const,
+        rationale: "r",
+        retrievalQueries: ["KEYWORD_ALPHA"],
+        answerTargetIndexes: [1],
+      },
+      {
+        label: "issue B",
+        likelihood: "most_likely" as const,
+        rationale: "r",
+        retrievalQueries: ["KEYWORD_BETA"],
+        answerTargetIndexes: [2],
+      },
+    ];
+
+    /** Skeptic that finds an unsupported leap ONLY in a "RECOVERY_"-prefixed statement —
+     * lets a test exercise "the recovery claim specifically gets rejected" without also
+     * rejecting an already-accepted first-pass claim reaching the same skeptic call. */
+    const rejectOnlyRecoverySkeptic: RunSkepticalVerificationFn = async (input) => {
+      return input.conclusions.map((conclusion) => {
+        const isRecovery = conclusion.statement.startsWith("RECOVERY_");
+        return {
+          conclusionIndex: conclusion.conclusionIndex,
+          hasUnsupportedLeap: isRecovery,
+          reason: isRecovery ? "Nieuprawniony skok logiczny w twierdzeniu odzyskanym." : "",
+        };
+      });
+    };
+
+    /** Verifier that accepts a conclusion iff its statement starts with "TARGET1_" or
+     * "RECOVERY_" and rejects anything else (e.g. an initial "TARGET2_"/"TARGET3_" draft
+     * claim) — lets one injected verifier simulate "target 1 verified, others not" across
+     * BOTH the first pass and a later recovery pass's own separate verifyDraftConclusions call
+     * (recovery conclusions are always tagged "RECOVERY_" in these fixtures). */
+    const acceptOnlyTarget1Verifier: VerifyConclusionSupportFn = async (input) => {
+      return input.conclusions.map((conclusion) => {
+        const accept = conclusion.statement.startsWith("TARGET1_") || conclusion.statement.startsWith("RECOVERY_");
+        return {
+          conclusionIndex: conclusion.conclusionIndex,
+          verdict: accept ? ("direct_support" as const) : ("no_support" as const),
+          reason: accept ? "Źródło wprost potwierdza tezę." : "Nie potwierdzono.",
+          evidence: accept ? conclusion.sources.map((s) => ({ sourceId: s.sourceId, excerpt: s.text })) : [],
+        };
+      });
+    };
+
+    it("11: target 1 verified + target 2 unsupported triggers exactly ONE partial recovery call, scoped to target 2 only", async () => {
+      const { currentVersion, beta } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy = vi.fn<GenerateRecoveryConclusionsFn>(async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_teza dla celu drugiego.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+            answerTargetIndex: 2,
+          },
+        ],
+        uncertainties: [],
+      }));
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        limitPerQuery: 2,
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(twoIssuesOneTargetEach, twoTargets),
+        generateFinalAnswer: async () => ({
+          answer: "",
+          conclusions: [
+            { statement: "TARGET1_potwierdzona teza.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 1 },
+            { statement: "TARGET2_odrzucona teza.", support: [{ sourceId: "SOURCE_2" }], answerTargetIndex: 2 },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: acceptOnlyTarget1Verifier,
+        runSkepticalVerification: noLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+        collectTrace: true,
+      });
+
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+      expect(result.trace?.recoveryMode).toBe("partial");
+      expect(result.trace?.unsupportedTargetsEnteringRecovery).toEqual([2]);
+      // recovery input was scoped to ONLY target 2 (not target 1, already verified)
+      const recoveryInput = recoverySpy.mock.calls[0][0];
+      expect(recoveryInput.answerTargets).toEqual([{ index: 2, text: "target two" }]);
+
+      expect(result.targetCoverage).toEqual([
+        { index: 1, text: "target one", status: "verified" },
+        { index: 2, text: "target two", status: "verified" },
+      ]);
+      // alpha's evidence (target 1) came only from beta's sibling id path is irrelevant here —
+      // key assertion is beta's provision id shows up somewhere in the sources actually used.
+      expect(result.sources.some((s) => s.legalProvisionId === beta.id)).toBe(true);
+    });
+
+    it("12: partial recovery ADDS target 2's conclusion without altering target 1's already-verified conclusion", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_teza dla celu drugiego.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+            answerTargetIndex: 2,
+          },
+        ],
+        uncertainties: [],
+      });
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        limitPerQuery: 2,
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(twoIssuesOneTargetEach, twoTargets),
+        generateFinalAnswer: async () => ({
+          answer: "",
+          conclusions: [
+            { statement: "TARGET1_potwierdzona teza.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 1 },
+            { statement: "TARGET2_odrzucona teza.", support: [{ sourceId: "SOURCE_2" }], answerTargetIndex: 2 },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: acceptOnlyTarget1Verifier,
+        runSkepticalVerification: noLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(result.conclusions).toHaveLength(2);
+      const target1Conclusion = result.conclusions.find((c) => c.answerTargetIndex === 1);
+      const target2Conclusion = result.conclusions.find((c) => c.answerTargetIndex === 2);
+      expect(target1Conclusion?.statement).toBe("TARGET1_potwierdzona teza.");
+      expect(target2Conclusion?.statement).toBe("RECOVERY_teza dla celu drugiego.");
+    });
+
+    it("13: two unsupported targets (alongside one verified) still cause exactly ONE recovery call combining both", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const threeTargets: LegalIssueDetectionResult["answerTargets"] = [
+        { text: "target one" },
+        { text: "target two" },
+        { text: "target three" },
+      ];
+      const recoverySpy = vi.fn<GenerateRecoveryConclusionsFn>(async () => ({ conclusions: [], uncertainties: [] }));
+
+      await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(
+          [
+            {
+              label: "issue A",
+              likelihood: "most_likely",
+              rationale: "r",
+              retrievalQueries: ["KEYWORD_ALPHA"],
+              answerTargetIndexes: [1, 2, 3],
+            },
+          ],
+          threeTargets,
+        ),
+        generateFinalAnswer: async () => ({
+          answer: "",
+          conclusions: [
+            { statement: "TARGET1_potwierdzona.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 1 },
+            { statement: "TARGET2_odrzucona.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 2 },
+            { statement: "TARGET3_odrzucona.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 3 },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: acceptOnlyTarget1Verifier,
+        runSkepticalVerification: noLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+      const recoveryInput = recoverySpy.mock.calls[0][0];
+      expect(recoveryInput.answerTargets?.map((t) => t.index).sort()).toEqual([2, 3]);
+    });
+
+    it("14: a partial-recovery claim still must pass verifier/excerpt/skeptic — it is not privileged", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_twierdzenie z nieuprawnionym skokiem.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+            answerTargetIndex: 2,
+          },
+        ],
+        uncertainties: [],
+      });
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        limitPerQuery: 2,
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(twoIssuesOneTargetEach, twoTargets),
+        generateFinalAnswer: async () => ({
+          answer: "",
+          conclusions: [
+            { statement: "TARGET1_potwierdzona teza.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 1 },
+            { statement: "TARGET2_odrzucona teza.", support: [{ sourceId: "SOURCE_2" }], answerTargetIndex: 2 },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: acceptOnlyTarget1Verifier,
+        runSkepticalVerification: rejectOnlyRecoverySkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      // skeptic rejects the recovery claim specifically — target 2 stays unsupported
+      expect(result.targetCoverage).toEqual([
+        { index: 1, text: "target one", status: "verified" },
+        { index: 2, text: "target two", status: "unsupported" },
+      ]);
+      expect(result.conclusions.every((c) => c.answerTargetIndex !== 2)).toBe(true);
+    });
+
+    it("16: zero verified normal conclusions preserves the existing WHOLE-answer (full) recovery semantics", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy = vi.fn<GenerateRecoveryConclusionsFn>(async () => ({ conclusions: [], uncertainties: [] }));
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(twoIssuesOneTargetEach, twoTargets),
+        generateFinalAnswer: async () => ({
+          answer: "",
+          conclusions: [
+            { statement: "odrzucona teza 1.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 1 },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: rejectAllVerifier,
+        generateRecoveryConclusions: recoverySpy,
+        collectTrace: true,
+      });
+
+      expect(result.trace?.recoveryMode).toBe("full");
+      expect(result.trace?.unsupportedTargetsEnteringRecovery.sort()).toEqual([1, 2]);
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+      expect(result.status).toBe("insufficient_evidence");
+    });
+
+    it("17: no more than one recovery model call happens for a single query, in either mode", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy = vi.fn<GenerateRecoveryConclusionsFn>(async () => ({ conclusions: [], uncertainties: [] }));
+
+      await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        limitPerQuery: 2,
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(twoIssuesOneTargetEach, twoTargets),
+        generateFinalAnswer: async () => ({
+          answer: "",
+          conclusions: [
+            { statement: "TARGET1_potwierdzona teza.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 1 },
+            { statement: "TARGET2_odrzucona teza.", support: [{ sourceId: "SOURCE_2" }], answerTargetIndex: 2 },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: acceptOnlyTarget1Verifier,
+        runSkepticalVerification: noLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("a null-tagged (genuinely peripheral) recovered fact does not satisfy the target it was recovered under", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const recoverySpy: GenerateRecoveryConclusionsFn = async (input) => ({
+        conclusions: [
+          {
+            statement: "RECOVERY_fakt poboczny, niezwiązany wprost z celem.",
+            support: [{ sourceId: input.sources[0].sourceId, excerpt: input.sources[0].text }],
+            answerTargetIndex: null,
+          },
+        ],
+        uncertainties: [],
+      });
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        limitPerQuery: 2,
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith(twoIssuesOneTargetEach, twoTargets),
+        generateFinalAnswer: async () => ({
+          answer: "",
+          conclusions: [
+            { statement: "TARGET1_potwierdzona teza.", support: [{ sourceId: "SOURCE_1" }], answerTargetIndex: 1 },
+            { statement: "TARGET2_odrzucona teza.", support: [{ sourceId: "SOURCE_2" }], answerTargetIndex: 2 },
+          ],
+          alternativePaths: [],
+          uncertainties: [],
+        }),
+        verifyConclusionSupport: acceptOnlyTarget1Verifier,
+        runSkepticalVerification: noLeapSkeptic,
+        generateRecoveryConclusions: recoverySpy,
+      });
+
+      // the recovered fact survives verification (it's a real, grounded claim) but — being
+      // untagged — never satisfies target 2's coverage, exactly as intended.
+      expect(result.conclusions.some((c) => c.statement.startsWith("RECOVERY_"))).toBe(true);
+      expect(result.targetCoverage).toEqual([
+        { index: 1, text: "target one", status: "verified" },
+        { index: 2, text: "target two", status: "unsupported" },
+      ]);
+    });
+  });
+
+  describe("verifier/skeptic fail-closed boundaries (Part 7/8 hardening)", () => {
+    it("18: a verifier INVALID_RESPONSE failure rejects every affected conclusion safely, never throws", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const verifyConclusionSupport: VerifyConclusionSupportFn = async () => {
+        throw new ConclusionVerificationError("malformed verifier output", "INVALID_RESPONSE");
+      };
+      const recoverySpy = vi.fn<GenerateRecoveryConclusionsFn>(async () => ({ conclusions: [], uncertainties: [] }));
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport,
+        generateRecoveryConclusions: recoverySpy,
+        collectTrace: true,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      expect(result.trace?.verifierStructuralFailureReason).toBe("malformed verifier output");
+      // recovery still gets an independent shot afterward
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("19: a verifier HTTP_ERROR/TIMEOUT failure still propagates as a thrown error, never becomes insufficient_evidence", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const verifyConclusionSupport: VerifyConclusionSupportFn = async () => {
+        throw new ConclusionVerificationError("verifier request timed out", "TIMEOUT");
+      };
+
+      await expect(
+        answerLegalProblem({
+          problemDescription: "opis problemu",
+          legalActVersionIds: [currentVersion.id],
+          db,
+          embedTexts: fakeEmbed,
+          detectIssues: detectionWith([
+            { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+          ]),
+          generateFinalAnswer: groundedAnswer(),
+          verifyConclusionSupport,
+        }),
+      ).rejects.toMatchObject({ code: "TIMEOUT" });
+    });
+
+    it("20: a skeptic INVALID_RESPONSE failure rejects every stage-1 survivor safely, never throws", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const runSkepticalVerification: RunSkepticalVerificationFn = async () => {
+        throw new SkepticalVerificationError("malformed skeptic output", "INVALID_RESPONSE");
+      };
+      const recoverySpy = vi.fn<GenerateRecoveryConclusionsFn>(async () => ({ conclusions: [], uncertainties: [] }));
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport: supportAllVerifier,
+        runSkepticalVerification,
+        generateRecoveryConclusions: recoverySpy,
+        collectTrace: true,
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      expect(result.trace?.skepticStructuralFailureReason).toBe("malformed skeptic output");
+      expect(recoverySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("21: a skeptic HTTP_ERROR/TIMEOUT failure still propagates as a thrown error, never becomes insufficient_evidence", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      const runSkepticalVerification: RunSkepticalVerificationFn = async () => {
+        throw new SkepticalVerificationError("OpenAI skeptic request failed with status 503", "HTTP_ERROR", 503);
+      };
+
+      await expect(
+        answerLegalProblem({
+          problemDescription: "opis problemu",
+          legalActVersionIds: [currentVersion.id],
+          db,
+          embedTexts: fakeEmbed,
+          detectIssues: detectionWith([
+            { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+          ]),
+          generateFinalAnswer: groundedAnswer(),
+          verifyConclusionSupport: supportAllVerifier,
+          runSkepticalVerification,
+        }),
+      ).rejects.toMatchObject({ code: "HTTP_ERROR", status: 503 });
+    });
+
+    it("22: malformed verifier AND skeptic output can never combine to produce a verified claim (safety wins over both)", async () => {
+      const { currentVersion } = await seedFixture();
+      if (!db) throw new Error("unreachable");
+
+      // Even a "generous" skeptic that never finds a leap cannot rescue a claim that never
+      // reached it because the verifier itself failed structurally first.
+      const verifyConclusionSupport: VerifyConclusionSupportFn = async () => {
+        throw new ConclusionVerificationError("malformed verifier output", "INVALID_RESPONSE");
+      };
+      const skepticSpy = vi.fn(noLeapSkeptic);
+
+      const result = await answerLegalProblem({
+        problemDescription: "opis problemu",
+        legalActVersionIds: [currentVersion.id],
+        db,
+        embedTexts: fakeEmbed,
+        detectIssues: detectionWith([
+          { label: "issue", likelihood: "possible", rationale: "rationale", retrievalQueries: ["KEYWORD_ALPHA"] },
+        ]),
+        generateFinalAnswer: groundedAnswer(),
+        verifyConclusionSupport,
+        runSkepticalVerification: skepticSpy,
+        generateRecoveryConclusions: async () => ({ conclusions: [], uncertainties: [] }),
+      });
+
+      expect(result.status).toBe("insufficient_evidence");
+      expect(result.conclusions).toEqual([]);
+      // skeptic was never even reached for the first-pass claim (verifier failed before it)
+      expect(skepticSpy).not.toHaveBeenCalled();
     });
   });
 });

@@ -3,10 +3,16 @@ import type { PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import * as schema from "../../../db/schema";
 import type { EmbedTextsFn } from "../search/embeddings";
 import { type DetectLegalIssuesFn, type DetectLegalIssuesOptions } from "../issues/detect";
-import { investigateLegalProblem, type AnswerTargetView, type LegalIssueInvestigationIssue } from "../issues/investigate";
+import {
+  investigateLegalProblem,
+  type AnswerTargetView,
+  type LegalIssueInvestigationIssue,
+  type LegalIssueInvestigationResult,
+} from "../issues/investigate";
 import { validateEvidenceAgainstSources } from "./evidence";
 import { FinalAnswerGenerationError, generateFinalAnswer, type GenerateFinalAnswerFn, type GenerateFinalAnswerOptions } from "./generate";
-import { packSources, type CurrentCorpusPackingContext, type PackedSource } from "./packing";
+import { scoreCandidateForTarget } from "./candidate-ranking";
+import { packSources, prioritizeSourcesForTargets, type CurrentCorpusPackingContext, type PackedSource } from "./packing";
 import {
   generateRecoveryConclusions,
   RecoveryGenerationError,
@@ -17,6 +23,7 @@ import type { RawRecoveryResponse, RecoveryConclusion } from "./recovery-schema"
 import type { FinalAnswerConclusion, FinalAnswerSourceReference, RawFinalAnswerResponse } from "./schema";
 import {
   runSkepticalVerification,
+  SkepticalVerificationError,
   type ConclusionForSkepticReview,
   type RunSkepticalVerificationFn,
   type RunSkepticalVerificationOptions,
@@ -24,6 +31,7 @@ import {
 import type { SkepticResult } from "./skeptic-schema";
 import {
   verifyConclusionSupport,
+  ConclusionVerificationError,
   type ConclusionSourceForVerification,
   type VerifyConclusionSupportFn,
   type VerifyConclusionSupportOptions,
@@ -122,10 +130,26 @@ export interface AnswerTargetCoverage extends AnswerTargetView {
  * this function already computes (no new OpenAI calls, no persistence). Undefined unless
  * `AnswerLegalProblemOptions.collectTrace` is true. Never wired into the Explorer UI/runtime.
  */
+/** Part 9: coarse per-target retrieval summary — how much (and how strong) evidence retrieval
+ * actually found for each answerTarget, independent of what packing chose to reserve. */
+export interface TargetRetrievalSignal extends AnswerTargetView {
+  /** Deterministic backstop (Part 3): true iff ensureDirectTargetQueries had to inject the
+   * target's own text as a query because none of the model's own queries already matched it. */
+  directTargetQueryAdded: boolean;
+  /** Count of distinct retrieved candidates carrying at least one foundBy entry for this target. */
+  candidateCount: number;
+  /** Best tier-weighted score (candidate-ranking.ts's scoreCandidateForTarget) among those
+   * candidates, or null if retrieval found nothing at all for this target. */
+  bestScore: number | null;
+}
+
 export interface LegalAnswerTrace {
   answerTargets: AnswerTargetView[];
   issues: LegalIssueInvestigationIssue[];
   retrievedProvisionCount: number;
+  /** Part 9 / Part 3: per-target retrieval strength summary, including whether the
+   * deterministic direct-target query backstop had to fire for that target. */
+  targetRetrievalSignals: TargetRetrievalSignal[];
   packedSources: PackedSource[];
   draftConclusions: FinalAnswerConclusion[];
   /** Set only when normal generation itself failed structurally (invalid/malformed model
@@ -134,12 +158,34 @@ export interface LegalAnswerTrace {
   generationStructuralFailureReason: string | null;
   rawVerifyResults: RawConclusionVerificationResult[];
   rawSkepticResults: SkepticResult[];
+  /** Set only when the stage-1 verifier (respectively stage-2 skeptic) itself returned a
+   * structurally invalid response in EITHER the first pass or the recovery pass (Part 7/8) —
+   * never for infra failures, which propagate as thrown errors. Null when both stages either
+   * succeeded or were never reached. */
+  verifierStructuralFailureReason: string | null;
+  skepticStructuralFailureReason: string | null;
   recoveryRan: boolean;
+  /** Part 5: which of the two mutually-exclusive recovery modes ran, if any. "full" = normal
+   * path produced zero verified conclusions (existing, unchanged, whole-answerTargets recovery).
+   * "partial" = at least one target already verified, recovery scoped to only the rest. */
+  recoveryMode: "none" | "full" | "partial";
+  /** 1-based answerTarget indexes that were still unsupported when recovery was invoked (i.e.
+   * what recovery was actually asked to try to rescue) — empty when recoveryMode is "none". */
+  unsupportedTargetsEnteringRecovery: number[];
+  /** Conclusions verified specifically by the recovery pass (a subset of the final
+   * `conclusions`, isolated here so a trace reader can see exactly what recovery contributed
+   * versus what the normal pass already had). */
+  recoveredConclusions: ResolvedConclusion[];
   /** Set only when the recovery pass itself failed structurally (same distinction as
    * generationStructuralFailureReason). Null when recovery wasn't run, or ran and either
    * succeeded or failed only for an infra reason (still swallowed by design — see
    * runRecoveryPass — but not reported here as "structural"). */
   recoveryStructuralFailureReason: string | null;
+  /** Coverage computed from ONLY the normal (pre-recovery) pass — lets a trace reader see
+   * exactly what recovery changed. */
+  targetCoverageBeforeRecovery: AnswerTargetCoverage[];
+  /** Final coverage, after recovery (if any) — identical to the top-level LegalAnswerResult
+   * field, duplicated here for a self-contained trace object. */
   targetCoverage: AnswerTargetCoverage[];
 }
 
@@ -224,13 +270,14 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
   });
 
   if (investigation.retrievedProvisions.length === 0) {
+    const emptyCoverage = investigation.answerTargets.map((target) => ({ ...target, status: "unsupported" as const }));
     return {
       status: "insufficient_evidence",
       problemDescription: investigation.problemDescription,
       legalActVersionIds: investigation.legalActVersionIds,
       answer: INSUFFICIENT_EVIDENCE_ANSWER,
       answerTargets: investigation.answerTargets,
-      targetCoverage: investigation.answerTargets.map((target) => ({ ...target, status: "unsupported" as const })),
+      targetCoverage: emptyCoverage,
       conclusions: [],
       alternativePaths: investigation.issues.map((issue) => ({
         issueLabel: issue.label,
@@ -245,14 +292,21 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
             answerTargets: investigation.answerTargets,
             issues: investigation.issues,
             retrievedProvisionCount: 0,
+            targetRetrievalSignals: computeTargetRetrievalSignals(investigation),
             packedSources: [],
             draftConclusions: [],
             generationStructuralFailureReason: null,
             rawVerifyResults: [],
             rawSkepticResults: [],
+            verifierStructuralFailureReason: null,
+            skepticStructuralFailureReason: null,
             recoveryRan: false,
+            recoveryMode: "none",
+            unsupportedTargetsEnteringRecovery: [],
+            recoveredConclusions: [],
             recoveryStructuralFailureReason: null,
-            targetCoverage: investigation.answerTargets.map((target) => ({ ...target, status: "unsupported" as const })),
+            targetCoverageBeforeRecovery: emptyCoverage,
+            targetCoverage: emptyCoverage,
           }
         : undefined,
     };
@@ -322,20 +376,37 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
   let verifiedConclusions = firstPass.verifiedConclusions;
   let demotedAlternativePaths = firstPass.demotedAlternativePaths;
   let recoveryRan = false;
+  let recoveryMode: "none" | "full" | "partial" = "none";
+  let unsupportedTargetsEnteringRecovery: number[] = [];
+  let recoveredConclusions: ResolvedConclusion[] = [];
   let recoveryStructuralFailureReason: string | null = null;
   let rawVerifyResults = firstPass.rawVerifyResults;
   let rawSkepticResults = firstPass.rawSkepticResults;
+  let verifierStructuralFailureReason = firstPass.verifierStructuralFailureReason;
+  let skepticStructuralFailureReason = firstPass.skepticStructuralFailureReason;
 
-  // Bounded, single source-first recovery pass: only when usable retrieval evidence exists
-  // (guaranteed at this point — the zero-provisions case already returned above) AND the
-  // normal generate -> verify -> skeptic pipeline produced zero verified conclusions (this
-  // includes the case where generation itself failed structurally, above — recovery still
-  // gets an independent shot at the same packed sources). Never runs when at least one
-  // conclusion already survived, and never loops or retries beyond this single call. See
-  // recovery.ts and runRecoveryPass for why this cannot rescue a rejected claim — it rebuilds
-  // from source text alone and is re-verified through the exact same gates as the first pass.
+  const targetCoverageBeforeRecovery = computeTargetCoverage(investigation.answerTargets, verifiedConclusions);
+
+  // Bounded, AT MOST ONE source-first recovery call per query (Part 5), in one of two
+  // mutually exclusive modes:
+  //
+  //   FULL — the normal generate -> verify -> skeptic pipeline produced ZERO verified
+  //   conclusions at all (this includes a structural generation failure, above). Existing
+  //   whole-answer behavior, unchanged: recovery is scoped to every answerTarget.
+  //
+  //   PARTIAL — at least one target already verified, but at least one OTHER target remains
+  //   unsupported. Recovery is scoped to ONLY the still-unsupported targets (their real,
+  //   un-renumbered indexes — see recovery-schema.ts's allowed-set generalization) and its
+  //   source list is reordered (never filtered — Part 6, packing.ts's prioritizeSourcesForTargets)
+  //   to examine target-associated evidence first while still allowing the rest of the packed
+  //   set to be cited. Already-verified conclusions from the first pass are NEVER replaced or
+  //   downgraded — recovery output is only ever appended to `verifiedConclusions`, and every
+  //   recovery conclusion (partial or full) is still funneled through the identical
+  //   verifier/excerpt/skeptic gates as the first pass (see runRecoveryPass).
   if (verifiedConclusions.length === 0) {
     recoveryRan = true;
+    recoveryMode = "full";
+    unsupportedTargetsEnteringRecovery = investigation.answerTargets.map((target) => target.index);
     const recoveryPass = await runRecoveryPass(
       investigation.problemDescription,
       packedSources,
@@ -344,10 +415,46 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
       options,
     );
     verifiedConclusions = recoveryPass.verifiedConclusions;
+    recoveredConclusions = recoveryPass.verifiedConclusions;
     demotedAlternativePaths = [...demotedAlternativePaths, ...recoveryPass.demotedAlternativePaths];
     rawVerifyResults = [...rawVerifyResults, ...recoveryPass.rawVerifyResults];
     rawSkepticResults = [...rawSkepticResults, ...recoveryPass.rawSkepticResults];
     recoveryStructuralFailureReason = recoveryPass.structuralFailureReason;
+    verifierStructuralFailureReason = verifierStructuralFailureReason ?? recoveryPass.verifierStructuralFailureReason;
+    skepticStructuralFailureReason = skepticStructuralFailureReason ?? recoveryPass.skepticStructuralFailureReason;
+  } else {
+    const stillUnsupported = targetCoverageBeforeRecovery.filter((target) => target.status === "unsupported");
+    const anyTargetVerified = targetCoverageBeforeRecovery.some((target) => target.status === "verified");
+
+    // Partial recovery requires BOTH at least one target already verified AND at least one
+    // other target still unsupported (Part 5: "target 1 rejected, target 2 verified"). A
+    // single-target question whose only verified conclusion happens to be untagged
+    // (answerTargetIndex: null — a legitimate, general claim) is NOT this scenario: there is
+    // no OTHER verified target to contrast against, so — exactly like the pre-existing
+    // whole-answer trigger's own "zero verified CONCLUSIONS" wording — recovery stays silent
+    // and the untagged-but-real conclusion is simply left as-is.
+    if (anyTargetVerified && stillUnsupported.length > 0) {
+      recoveryRan = true;
+      recoveryMode = "partial";
+      unsupportedTargetsEnteringRecovery = stillUnsupported.map((target) => target.index);
+      const sourcesForRecovery = prioritizeSourcesForTargets(packedSources, unsupportedTargetsEnteringRecovery);
+      const recoveryPass = await runRecoveryPass(
+        investigation.problemDescription,
+        sourcesForRecovery,
+        packedBySourceId,
+        stillUnsupported.map((target) => ({ index: target.index, text: target.text })),
+        options,
+      );
+      // ADD only — the first pass's verified conclusions are never replaced or removed.
+      verifiedConclusions = [...verifiedConclusions, ...recoveryPass.verifiedConclusions];
+      recoveredConclusions = recoveryPass.verifiedConclusions;
+      demotedAlternativePaths = [...demotedAlternativePaths, ...recoveryPass.demotedAlternativePaths];
+      rawVerifyResults = [...rawVerifyResults, ...recoveryPass.rawVerifyResults];
+      rawSkepticResults = [...rawSkepticResults, ...recoveryPass.rawSkepticResults];
+      recoveryStructuralFailureReason = recoveryPass.structuralFailureReason;
+      verifierStructuralFailureReason = verifierStructuralFailureReason ?? recoveryPass.verifierStructuralFailureReason;
+      skepticStructuralFailureReason = skepticStructuralFailureReason ?? recoveryPass.skepticStructuralFailureReason;
+    }
   }
 
   const alternativePaths = [...draftAlternativePaths, ...demotedAlternativePaths];
@@ -358,13 +465,20 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
         answerTargets: investigation.answerTargets,
         issues: investigation.issues,
         retrievedProvisionCount: investigation.retrievedProvisions.length,
+        targetRetrievalSignals: computeTargetRetrievalSignals(investigation),
         packedSources,
         draftConclusions: raw.conclusions,
         generationStructuralFailureReason,
         rawVerifyResults,
         rawSkepticResults,
+        verifierStructuralFailureReason,
+        skepticStructuralFailureReason,
         recoveryRan,
+        recoveryMode,
+        unsupportedTargetsEnteringRecovery,
+        recoveredConclusions,
         recoveryStructuralFailureReason,
+        targetCoverageBeforeRecovery,
         targetCoverage,
       }
     : undefined;
@@ -419,6 +533,31 @@ export async function answerLegalProblem(options: AnswerLegalProblemOptions): Pr
     sources: packedSources,
     trace,
   };
+}
+
+/**
+ * Part 9 debug-trace helper: a coarse, deterministic summary of how strongly retrieval found
+ * evidence for each answerTarget, independent of packing's final choices — computed purely
+ * from data investigateLegalProblem already returned (no new queries, no new model calls).
+ */
+function computeTargetRetrievalSignals(investigation: LegalIssueInvestigationResult): TargetRetrievalSignal[] {
+  const directTargetQueriesAdded = new Set(investigation.directTargetQueriesAdded);
+  return investigation.answerTargets.map((target) => {
+    const candidatesForTarget = investigation.retrievedProvisions.filter((provision) =>
+      provision.foundBy.some((entry) => entry.answerTargetIndex === target.index),
+    );
+    const bestScore =
+      candidatesForTarget.length > 0
+        ? Math.max(...candidatesForTarget.map((candidate) => scoreCandidateForTarget(candidate, target.index).score))
+        : null;
+
+    return {
+      ...target,
+      directTargetQueryAdded: directTargetQueriesAdded.has(target.index),
+      candidateCount: candidatesForTarget.length,
+      bestScore,
+    };
+  });
 }
 
 /**
@@ -539,7 +678,23 @@ interface VerifyDraftConclusionsResult {
   /** Raw stage-1/stage-2 model outputs, for the Phase 13 debug trace only. */
   rawVerifyResults: RawConclusionVerificationResult[];
   rawSkepticResults: SkepticResult[];
+  /** Part 7/8 fail-closed boundary: set only when the stage-1 verifier (respectively stage-2
+   * skeptic) call itself returned a structurally invalid response — never for infra failures
+   * (CONFIG/HTTP_ERROR/TIMEOUT), which still propagate as thrown errors instead of reaching
+   * here. When set, EVERY conclusion in the affected batch was deterministically demoted
+   * (never verified) — "safety must win" over letting a claim through unverified. */
+  verifierStructuralFailureReason: string | null;
+  skepticStructuralFailureReason: string | null;
 }
+
+const EMPTY_VERIFY_RESULT: VerifyDraftConclusionsResult = {
+  verifiedConclusions: [],
+  demotedAlternativePaths: [],
+  rawVerifyResults: [],
+  rawSkepticResults: [],
+  verifierStructuralFailureReason: null,
+  skepticStructuralFailureReason: null,
+};
 
 async function verifyDraftConclusions(
   problemDescription: string,
@@ -548,7 +703,7 @@ async function verifyDraftConclusions(
   options: AnswerLegalProblemOptions,
 ): Promise<VerifyDraftConclusionsResult> {
   if (draftConclusions.length === 0) {
-    return { verifiedConclusions: [], demotedAlternativePaths: [], rawVerifyResults: [], rawSkepticResults: [] };
+    return EMPTY_VERIFY_RESULT;
   }
 
   const conclusionsToVerify = draftConclusions.map((conclusion, conclusionIndex) => ({
@@ -561,10 +716,35 @@ async function verifyDraftConclusions(
   }));
 
   const verify = options.verifyConclusionSupport ?? verifyConclusionSupport;
-  const strictResults = await verify(
-    { problemDescription, conclusions: conclusionsToVerify },
-    options.verifyConclusionSupportOptions,
-  );
+  let strictResults: RawConclusionVerificationResult[];
+  try {
+    strictResults = await verify(
+      { problemDescription, conclusions: conclusionsToVerify },
+      options.verifyConclusionSupportOptions,
+    );
+  } catch (error) {
+    if (error instanceof ConclusionVerificationError && error.code === "INVALID_RESPONSE") {
+      // Part 7: one verifier call covers ALL conclusions in this batch — a structurally
+      // invalid response means NONE of them can be safely verified, so every one fails closed
+      // to a demoted alternative path (never silently treated as verified). CONFIG/HTTP_ERROR/
+      // TIMEOUT are infra/config failures, not answer-validity failures, and are deliberately
+      // NOT caught here — they propagate uncaught so a genuine outage is never mistaken for a
+      // legal non-answer.
+      return {
+        verifiedConclusions: [],
+        demotedAlternativePaths: draftConclusions.map((conclusion) => ({
+          issueLabel: conclusion.statement,
+          explanation: `Weryfikacja merytoryczna (etap 1) nie powiodła się z przyczyn technicznych (nieprawidłowa odpowiedź modelu) — twierdzenie odrzucono zgodnie z zasadą fail-closed: ${error.message}`,
+          support: [],
+        })),
+        rawVerifyResults: [],
+        rawSkepticResults: [],
+        verifierStructuralFailureReason: error.message,
+        skepticStructuralFailureReason: null,
+      };
+    }
+    throw error;
+  }
 
   const strictByIndex = new Map<number, RawConclusionVerificationResult>();
   for (const result of strictResults) {
@@ -632,7 +812,14 @@ async function verifyDraftConclusions(
   });
 
   if (strictPassed.length === 0) {
-    return { verifiedConclusions: [], demotedAlternativePaths, rawVerifyResults: strictResults, rawSkepticResults: [] };
+    return {
+      verifiedConclusions: [],
+      demotedAlternativePaths,
+      rawVerifyResults: strictResults,
+      rawSkepticResults: [],
+      verifierStructuralFailureReason: null,
+      skepticStructuralFailureReason: null,
+    };
   }
 
   const skepticInput: ConclusionForSkepticReview[] = strictPassed.map((passed) => ({
@@ -643,10 +830,36 @@ async function verifyDraftConclusions(
   }));
 
   const skeptic = options.runSkepticalVerification ?? runSkepticalVerification;
-  const skepticResults = await skeptic(
-    { problemDescription, conclusions: skepticInput },
-    options.runSkepticalVerificationOptions,
-  );
+  let skepticResults: SkepticResult[];
+  try {
+    skepticResults = await skeptic(
+      { problemDescription, conclusions: skepticInput },
+      options.runSkepticalVerificationOptions,
+    );
+  } catch (error) {
+    if (error instanceof SkepticalVerificationError && error.code === "INVALID_RESPONSE") {
+      // Part 8: SAFETY MUST WIN — a claim must never survive merely because the skeptic
+      // couldn't produce valid output. Every stage-1 survivor in this batch fails closed to a
+      // demoted alternative path. Infra/config/HTTP/timeout errors are NOT caught here and
+      // still propagate, same principle as the verifier boundary above.
+      return {
+        verifiedConclusions: [],
+        demotedAlternativePaths: [
+          ...demotedAlternativePaths,
+          ...strictPassed.map((passed) => ({
+            issueLabel: passed.conclusion.statement,
+            explanation: `Weryfikacja krytyczna (etap 2) nie powiodła się z przyczyn technicznych (nieprawidłowa odpowiedź modelu) — twierdzenie odrzucono zgodnie z zasadą fail-closed: ${error.message}`,
+            support: [],
+          })),
+        ],
+        rawVerifyResults: strictResults,
+        rawSkepticResults: [],
+        verifierStructuralFailureReason: null,
+        skepticStructuralFailureReason: error.message,
+      };
+    }
+    throw error;
+  }
 
   const skepticByIndex = new Map<number, SkepticResult>();
   for (const result of skepticResults) {
@@ -686,7 +899,14 @@ async function verifyDraftConclusions(
     });
   }
 
-  return { verifiedConclusions, demotedAlternativePaths, rawVerifyResults: strictResults, rawSkepticResults: skepticResults };
+  return {
+    verifiedConclusions,
+    demotedAlternativePaths,
+    rawVerifyResults: strictResults,
+    rawSkepticResults: skepticResults,
+    verifierStructuralFailureReason: null,
+    skepticStructuralFailureReason: null,
+  };
 }
 
 /**
@@ -789,6 +1009,8 @@ async function runRecoveryPass(
       demotedAlternativePaths: [],
       rawVerifyResults: [],
       rawSkepticResults: [],
+      verifierStructuralFailureReason: null,
+      skepticStructuralFailureReason: null,
       structuralFailureReason,
     };
   }

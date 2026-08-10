@@ -126,12 +126,14 @@ function buildUserMessage(input: GenerateRecoveryConclusionsInput): string {
  * `support.sourceId` to exactly the SOURCE_X identifiers supplied to this recovery call —
  * the same mechanism as generate.ts's buildFinalAnswerJsonSchema.
  */
-function buildRecoveryJsonSchema(sourceIds: string[], answerTargetCount: number) {
+function buildRecoveryJsonSchema(sourceIds: string[], allowedTargetIndexes: number[]) {
   // Same nullable-enum "anyOf" pattern as generate.ts's buildFinalAnswerJsonSchema — no
-  // second target model, no new strict-schema idiom.
+  // second target model, no new strict-schema idiom. Enumerates the actual allowed indexes
+  // (not 1..count) so a partial/subset recovery call (Part 5) still only ever offers the
+  // model the real, un-renumbered target indexes it was scoped to.
   const answerTargetIndexSchema =
-    answerTargetCount > 0
-      ? { anyOf: [{ type: "integer", enum: Array.from({ length: answerTargetCount }, (_, i) => i + 1) }, { type: "null" }] }
+    allowedTargetIndexes.length > 0
+      ? { anyOf: [{ type: "integer", enum: allowedTargetIndexes }, { type: "null" }] }
       : { type: "null" };
 
   return {
@@ -197,9 +199,9 @@ export async function generateRecoveryConclusions(
 
   const sourceIds = input.sources.map((source) => source.sourceId);
   const validSourceIds = new Set(sourceIds);
-  const answerTargetCount = input.answerTargets?.length ?? 0;
-  const responseSchema = buildRawRecoveryResponseSchema(validSourceIds, answerTargetCount);
-  const jsonSchema = buildRecoveryJsonSchema(sourceIds, answerTargetCount);
+  const allowedTargetIndexes = (input.answerTargets ?? []).map((target) => target.index);
+  const responseSchema = buildRawRecoveryResponseSchema(validSourceIds, new Set(allowedTargetIndexes));
+  const jsonSchema = buildRecoveryJsonSchema(sourceIds, allowedTargetIndexes);
   const userMessage = buildUserMessage(input);
 
   for (let attempt = 0; ; attempt += 1) {

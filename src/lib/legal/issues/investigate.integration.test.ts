@@ -6,7 +6,7 @@ import { createTestDatabase } from "../../test-support/test-db";
 import type { EmbedTextsFn } from "../search/embeddings";
 import { indexLegalSearchDocuments } from "../search/indexing";
 import type { DetectLegalIssuesFn } from "./detect";
-import { capRetrievalQueries, investigateLegalProblem, LegalIssueInvestigationError } from "./investigate";
+import { capRetrievalQueries, ensureDirectTargetQueries, investigateLegalProblem, LegalIssueInvestigationError } from "./investigate";
 import type { LegalIssueDetectionResult, LegalIssueHypothesis } from "./schema";
 
 const testDatabase = createTestDatabase();
@@ -292,7 +292,12 @@ describeDatabase("investigateLegalProblem", () => {
             ],
           },
         ],
-        [{ text: "czy dłużnik odpowiada za nienależyte wykonanie" }, { text: "czy przysługuje rękojmia" }],
+        // Deliberately abstract, non-overlapping target text (no shared lexemes with the
+        // fixture's KEYWORD_ALPHA/BETA provisions) so the Part 3 direct-target backstop query
+        // this test doesn't otherwise cover cannot accidentally retrieve anything itself —
+        // this test is about capping/dedup, not the backstop (see ensureDirectTargetQueries's
+        // own dedicated unit tests for that).
+        [{ text: "cel abstrakcyjny jeden xyzzy" }, { text: "cel abstrakcyjny dwa plugh" }],
       ),
     });
 
@@ -302,7 +307,12 @@ describeDatabase("investigateLegalProblem", () => {
     // multiple retrieval queries per issue preserved (both under the possible-issue cap of
     // 1-per-target, since they target DIFFERENT answerTargetIndex values here: both are
     // tagged answerTargetIndex 2 in this fixture on purpose, so only the first survives the cap)
-    expect(result.issues[1].retrievalQueries).toEqual([{ query: "KEYWORD_BETA", answerTargetIndex: 2 }]);
+    // — plus one Part 3 direct-target backstop query, since neither KEYWORD_BETA nor the
+    // capped-away KEYWORD_ALPHA duplicate matches this issue's own target text.
+    expect(result.issues[1].retrievalQueries).toEqual([
+      { query: "KEYWORD_BETA", answerTargetIndex: 2 },
+      { query: "cel abstrakcyjny dwa plugh", answerTargetIndex: 2 },
+    ]);
 
     // alpha was found only via issue 1 (KEYWORD_ALPHA) — issue 2's KEYWORD_ALPHA query was
     // capped away (possible-issue queries capped at 1 per answerTargetIndex)
@@ -405,6 +415,7 @@ describeDatabase("investigateLegalProblem", () => {
         "clarificationQuestion",
         "answerTargets",
         "issues",
+        "directTargetQueriesAdded",
         "retrievedProvisions",
       ].sort(),
     );
@@ -511,5 +522,116 @@ describe("capRetrievalQueries", () => {
     const snapshot = JSON.parse(JSON.stringify(input));
     capRetrievalQueries(input);
     expect(input).toEqual(snapshot);
+  });
+});
+
+describe("ensureDirectTargetQueries (Part 3 hardening)", () => {
+  const target1 = { index: 1, text: "jakie prawa ma producent bazy danych" };
+  const target2 = { index: 2, text: "przed czym chroni ustawa" };
+
+  it("1: injects the target's own text as a query when no existing query already matches it", () => {
+    const issues: LegalIssueHypothesis[] = [
+      {
+        label: "issue",
+        likelihood: "most_likely",
+        rationale: "r",
+        answerTargetIndexes: [1],
+        retrievalQueries: [{ query: "ustawa o ochronie baz danych", answerTargetIndex: 1 }],
+      },
+    ];
+    const result = ensureDirectTargetQueries(issues, [target1]);
+    expect(result.directTargetQueriesAdded).toEqual([1]);
+    expect(result.issues[0].retrievalQueries).toContainEqual({
+      query: target1.text,
+      answerTargetIndex: 1,
+    });
+  });
+
+  it("2: does not duplicate an existing query that already matches the target text (case/whitespace-insensitive)", () => {
+    const issues: LegalIssueHypothesis[] = [
+      {
+        label: "issue",
+        likelihood: "most_likely",
+        rationale: "r",
+        answerTargetIndexes: [1],
+        retrievalQueries: [{ query: "  JAKIE PRAWA MA producent   bazy danych  ", answerTargetIndex: 1 }],
+      },
+    ];
+    const result = ensureDirectTargetQueries(issues, [target1]);
+    expect(result.directTargetQueriesAdded).toEqual([]);
+    expect(result.issues[0].retrievalQueries).toHaveLength(1);
+  });
+
+  it("3: adds at most one backstop query per target, bounded by the number of answerTargets (never unbounded)", () => {
+    const issues: LegalIssueHypothesis[] = [
+      {
+        label: "issue",
+        likelihood: "most_likely",
+        rationale: "r",
+        answerTargetIndexes: [1, 2],
+        retrievalQueries: [
+          { query: "generic query one", answerTargetIndex: 1 },
+          { query: "generic query two", answerTargetIndex: 2 },
+        ],
+      },
+    ];
+    const result = ensureDirectTargetQueries(issues, [target1, target2]);
+    expect(result.directTargetQueriesAdded.sort()).toEqual([1, 2]);
+    // exactly 2 extra queries added (one per target), never more
+    expect(result.issues[0].retrievalQueries).toHaveLength(4);
+  });
+
+  it("4: attaches the backstop to the first non-needs_more_information issue covering the target, preserving its likelihood", () => {
+    const issues: LegalIssueHypothesis[] = [
+      {
+        label: "needs-info issue",
+        likelihood: "needs_more_information",
+        rationale: "r",
+        answerTargetIndexes: [1],
+        retrievalQueries: [],
+      },
+      {
+        label: "possible issue",
+        likelihood: "possible",
+        rationale: "r",
+        answerTargetIndexes: [1],
+        retrievalQueries: [{ query: "unrelated query", answerTargetIndex: 1 }],
+      },
+    ];
+    const result = ensureDirectTargetQueries(issues, [target1]);
+    expect(result.issues[0].retrievalQueries).toEqual([]);
+    expect(result.issues[1].retrievalQueries).toContainEqual({ query: target1.text, answerTargetIndex: 1 });
+  });
+
+  it("skips a target with no covering issue at all, rather than inventing one", () => {
+    const issues: LegalIssueHypothesis[] = [
+      {
+        label: "issue",
+        likelihood: "most_likely",
+        rationale: "r",
+        answerTargetIndexes: [1],
+        retrievalQueries: [{ query: "q", answerTargetIndex: 1 }],
+      },
+    ];
+    const result = ensureDirectTargetQueries(issues, [target1, target2]);
+    expect(result.directTargetQueriesAdded).toEqual([1]);
+    expect(result.issues.flatMap((i) => i.retrievalQueries)).not.toContainEqual(
+      expect.objectContaining({ answerTargetIndex: 2 }),
+    );
+  });
+
+  it("is a pure function that never mutates its input issues array", () => {
+    const issues: LegalIssueHypothesis[] = [
+      {
+        label: "issue",
+        likelihood: "most_likely",
+        rationale: "r",
+        answerTargetIndexes: [1],
+        retrievalQueries: [{ query: "q", answerTargetIndex: 1 }],
+      },
+    ];
+    const snapshot = JSON.parse(JSON.stringify(issues));
+    ensureDirectTargetQueries(issues, [target1]);
+    expect(issues).toEqual(snapshot);
   });
 });

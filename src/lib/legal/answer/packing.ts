@@ -1,5 +1,5 @@
 import type { AnswerTargetView, DeduplicatedRetrievedProvision } from "../issues/investigate";
-import { rankCandidates } from "./candidate-ranking";
+import { rankCandidates, rankCandidatesForTarget } from "./candidate-ranking";
 
 export interface PackedSource {
   sourceId: string;
@@ -153,16 +153,20 @@ export function packSources(
     return true;
   }
 
-  // PASS 1: reserve the best most_likely-found candidate per answerTarget.
+  // PASS 1: reserve the best most_likely-found candidate per answerTarget. Ranked TARGET-
+  // SCOPED (Part 4) — not by the global `ranked` order — so a candidate that scores well only
+  // because of a DIFFERENT target's query can never win THIS target's reservation merely by
+  // appearing first in the global list.
   for (const target of answerTargets) {
-    const qualifying = ranked.filter(
+    const qualifying = deduped.filter(
       (candidate) =>
         !reservedProvisionIds.has(candidate.legalProvisionId) &&
         candidate.foundBy.some(
           (entry) => entry.issueLikelihood === "most_likely" && entry.answerTargetIndex === target.index,
         ),
     );
-    const best = qualifying[0];
+    const rankedForTarget = rankCandidatesForTarget(qualifying, target.index);
+    const best = rankedForTarget[0];
     if (best) {
       tryAdd(best, [target.index]);
     }
@@ -193,4 +197,28 @@ export function packSources(
       entry.reservedForAnswerTargetIndexes,
     ),
   );
+}
+
+/**
+ * Part 6 (recovery source discipline): stable-reorders an already-packed source list so
+ * sources RESERVED (see PackedSource.reservedForAnswerTargetIndexes) for one of the given
+ * target indexes come first — never filtered out, never a fresh retrieval pass, just a
+ * presentation-order preference so a bounded, source-first recovery call "preferentially
+ * examines" the evidence most likely to matter for the targets it's trying to rescue. Sources
+ * with no overlap keep their existing relative order, appended after.
+ */
+export function prioritizeSourcesForTargets(sources: PackedSource[], targetIndexes: readonly number[]): PackedSource[] {
+  const targetIndexSet = new Set(targetIndexes);
+  const prioritized: PackedSource[] = [];
+  const rest: PackedSource[] = [];
+
+  for (const source of sources) {
+    if (source.reservedForAnswerTargetIndexes.some((index) => targetIndexSet.has(index))) {
+      prioritized.push(source);
+    } else {
+      rest.push(source);
+    }
+  }
+
+  return [...prioritized, ...rest];
 }

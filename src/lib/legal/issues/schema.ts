@@ -130,3 +130,30 @@ export function checkAnswerTargetIndexInRange(
     });
   }
 }
+
+/**
+ * Set-based generalization of checkAnswerTargetIndexInRange — needed by recovery, which can be
+ * scoped to a SUBSET of the request's answerTargets (Part 5: partial, target-scoped recovery)
+ * while every index must still refer to the target's ORIGINAL, un-renumbered position. A
+ * contiguous 1..N range check cannot express "only indexes {2} are valid right now" — this is
+ * still the exact same answerTargetIndex model, just validated against an explicit allowed set
+ * instead of an implicit contiguous range (checkAnswerTargetIndexInRange is the special case
+ * where allowedIndexes = {1..maxIndex}).
+ */
+export function checkAnswerTargetIndexInAllowedSet(
+  ctx: z.RefinementCtx,
+  targetIndex: number | null | undefined,
+  allowedIndexes: ReadonlySet<number>,
+  path: (string | number)[],
+): void {
+  if (targetIndex === null || targetIndex === undefined) {
+    return;
+  }
+  if (!allowedIndexes.has(targetIndex)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `answerTargetIndex ${targetIndex} is not among the answerTargets supplied for this request`,
+      path,
+    });
+  }
+}

@@ -96,6 +96,14 @@ async function main() {
     console.log(`RETRIEVED PROVISIONS (deduplicated): ${trace.retrievedProvisionCount}`);
     console.log("");
 
+    console.log("TARGET RETRIEVAL SIGNALS");
+    trace.targetRetrievalSignals.forEach((t) =>
+      console.log(
+        `  [${t.index}] ${t.text} — candidates=${t.candidateCount} bestScore=${t.bestScore?.toFixed(5) ?? "-"} directTargetQueryAdded=${t.directTargetQueryAdded}`,
+      ),
+    );
+    console.log("");
+
     console.log(`PACKED SOURCES: ${trace.packedSources.length}`);
     trace.packedSources.forEach((source) => {
       const reserved =
@@ -117,19 +125,32 @@ async function main() {
 
     console.log("VERIFY (stage 1) RAW RESULTS");
     trace.rawVerifyResults.forEach((r) => console.log(`  #${r.conclusionIndex}: ${r.verdict} — ${r.reason}`));
+    console.log(`  verifier structural failure: ${trace.verifierStructuralFailureReason ?? "(none)"}`);
     console.log("");
 
     console.log("SKEPTIC (stage 2) RAW RESULTS");
     trace.rawSkepticResults.forEach((r) =>
       console.log(`  #${r.conclusionIndex}: hasUnsupportedLeap=${r.hasUnsupportedLeap} — ${r.reason}`),
     );
+    console.log(`  skeptic structural failure: ${trace.skepticStructuralFailureReason ?? "(none)"}`);
     console.log("");
 
-    console.log(`RECOVERY PASS RAN: ${trace.recoveryRan}`);
-    console.log(`RECOVERY STRUCTURAL FAILURE: ${trace.recoveryStructuralFailureReason ?? "(none)"}`);
+    console.log("TARGET COVERAGE (before recovery)");
+    trace.targetCoverageBeforeRecovery.forEach((t) => console.log(`  [${t.index}] ${t.status}: ${t.text}`));
     console.log("");
 
-    console.log("TARGET COVERAGE");
+    console.log(`RECOVERY PASS RAN: ${trace.recoveryRan} (mode: ${trace.recoveryMode})`);
+    if (trace.recoveryRan) {
+      console.log(`  unsupported targets entering recovery: [${trace.unsupportedTargetsEnteringRecovery.join(", ")}]`);
+      console.log(`  recovered conclusions: ${trace.recoveredConclusions.length}`);
+      trace.recoveredConclusions.forEach((c) =>
+        console.log(`    [target ${c.answerTargetIndex ?? "-"}] ${c.statement}`),
+      );
+    }
+    console.log(`  recovery structural failure: ${trace.recoveryStructuralFailureReason ?? "(none)"}`);
+    console.log("");
+
+    console.log("TARGET COVERAGE (final, after recovery)");
     trace.targetCoverage.forEach((t) => console.log(`  [${t.index}] ${t.status}: ${t.text}`));
     console.log("");
 

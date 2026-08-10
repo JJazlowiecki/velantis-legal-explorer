@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import type { DeduplicatedRetrievedProvision, RetrievalProvenanceEntry } from "../issues/investigate";
-import { compareCandidates, rankCandidates, scoreCandidate } from "./candidate-ranking";
+import {
+  compareCandidates,
+  compareCandidatesForTarget,
+  rankCandidates,
+  rankCandidatesForTarget,
+  scoreCandidate,
+  scoreCandidateForTarget,
+} from "./candidate-ranking";
 
 function provenance(overrides: Partial<RetrievalProvenanceEntry> = {}): RetrievalProvenanceEntry {
   return {
@@ -114,6 +121,63 @@ describe("compareCandidates / rankCandidates", () => {
       provision("art. 1", [provenance({ issueLikelihood: "most_likely", finalScore: 0.02 })]),
     ];
     items.sort(compareCandidates);
+    expect(items[0].citationLabel).toBe("art. 1");
+  });
+});
+
+describe("scoreCandidateForTarget / compareCandidatesForTarget / rankCandidatesForTarget (Part 4 hardening)", () => {
+  it("5: a candidate strong for THIS target beats one that's strong only for a DIFFERENT target", () => {
+    // "central target source beats procedural peripheral source when target evidence is
+    // stronger": procedural provision scores very high overall via target 2, but weak (or
+    // absent) for target 1 specifically — target-scoped ranking must prefer the eligibility
+    // provision for target 1's own reservation.
+    const eligibility = provision("art. 2 ust. 1 pkt 1", [
+      provenance({ issueLikelihood: "most_likely", answerTargetIndex: 1, finalScore: 0.015 }),
+    ]);
+    const procedural = provision("art. 4", [
+      provenance({ issueLikelihood: "most_likely", answerTargetIndex: 2, finalScore: 0.033 }),
+    ]);
+
+    const rankedForTarget1 = rankCandidatesForTarget([procedural, eligibility], 1);
+    expect(rankedForTarget1[0].citationLabel).toBe("art. 2 ust. 1 pkt 1");
+  });
+
+  it("6: query multiplicity for a DIFFERENT target cannot inflate a candidate's score for THIS target", () => {
+    const strongForOtherTargetOnly = provision("art. 4", [
+      provenance({ issueLikelihood: "most_likely", answerTargetIndex: 2, finalScore: 0.03 }),
+      provenance({ issueLikelihood: "most_likely", answerTargetIndex: 2, finalScore: 0.031 }),
+      provenance({ issueLikelihood: "most_likely", answerTargetIndex: 2, finalScore: 0.032 }),
+    ]);
+    // Scoring FOR target 1 must ignore all of the above (none of them tag target 1).
+    expect(scoreCandidateForTarget(strongForOtherTargetOnly, 1).score).toBe(0);
+    expect(scoreCandidateForTarget(strongForOtherTargetOnly, 1).bestMostLikelyScore).toBeNull();
+  });
+
+  it("7: exact citation match is scoped to the target it was found for — does not leak into an unrelated target's ranking", () => {
+    const exactForTarget2 = provision("art. 6", [
+      provenance({ issueLikelihood: "possible", answerTargetIndex: 2, finalScore: 0.001, isExactCitationMatch: true }),
+    ]);
+    const strongForTarget1 = provision("art. 7", [
+      provenance({ issueLikelihood: "most_likely", answerTargetIndex: 1, finalScore: 0.03 }),
+    ]);
+
+    // For target 1, the exact-match candidate has NO entry tagged to target 1 at all, so it
+    // must not win purely because it's a global exact citation match found for a different target.
+    const rankedForTarget1 = rankCandidatesForTarget([exactForTarget2, strongForTarget1], 1);
+    expect(rankedForTarget1[0].citationLabel).toBe("art. 7");
+    expect(scoreCandidateForTarget(exactForTarget2, 1).isExactCitationMatch).toBe(false);
+
+    // But for target 2, the exact match still correctly wins.
+    const rankedForTarget2 = rankCandidatesForTarget([exactForTarget2, strongForTarget1], 2);
+    expect(rankedForTarget2[0].citationLabel).toBe("art. 6");
+  });
+
+  it("compareCandidatesForTarget is a valid comparator usable directly with Array.prototype.sort", () => {
+    const items = [
+      provision("art. 3", [provenance({ issueLikelihood: "possible", answerTargetIndex: 1, finalScore: 0.01 })]),
+      provision("art. 1", [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 1, finalScore: 0.02 })]),
+    ];
+    items.sort((a, b) => compareCandidatesForTarget(a, b, 1));
     expect(items[0].citationLabel).toBe("art. 1");
   });
 });

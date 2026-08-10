@@ -266,4 +266,97 @@ describe("packSources", () => {
       expect(packed[0].provenCurrentAsOf).toBeNull();
     });
   });
+
+  describe("target-contamination prevention in PASS 1 reservation (Part 4/10.8 hardening)", () => {
+    it("8: a candidate strong for a DIFFERENT (unrelated) target does not win THIS target's reservation over the candidate that's actually strong for it", () => {
+      // A high-global-score candidate found only via target 2's query must never be reserved
+      // for target 1 merely because it sorts first in the old GLOBAL ranking.
+      const strongForTarget2Only = provision({
+        legalProvisionId: "unrelated",
+        citationLabel: "art. 4",
+        foundBy: [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 2, finalScore: 0.033 })],
+      });
+      const weakerButActuallyForTarget1 = provision({
+        legalProvisionId: "actual-target-1-evidence",
+        citationLabel: "art. 2 ust. 1 pkt 1",
+        foundBy: [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 1, finalScore: 0.015 })],
+      });
+
+      const packed = packSources([strongForTarget2Only, weakerButActuallyForTarget1], {
+        answerTargets: [
+          { index: 1, text: "target one" },
+          { index: 2, text: "target two" },
+        ],
+      });
+
+      const target1Reservation = packed.find((s) => s.reservedForAnswerTargetIndexes.includes(1));
+      expect(target1Reservation?.legalProvisionId).toBe("actual-target-1-evidence");
+    });
+  });
+
+  describe("regression fixtures (Part 10.9-10)", () => {
+    it("9: DATABASE fixture — the core exclusive-right provision reaches the final pack over an adjacent exception/procedure provision", () => {
+      const coreRight = provision({
+        legalProvisionId: "art-6-ust-1",
+        citationLabel: "art. 6 ust. 1",
+        foundBy: [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 1, finalScore: 0.02 })],
+      });
+      const adjacentException = provision({
+        legalProvisionId: "art-8-exception",
+        citationLabel: "art. 8 ust. 1",
+        foundBy: [provenance({ issueLikelihood: "possible", answerTargetIndex: 2, finalScore: 0.033 })],
+      });
+      const padding = Array.from({ length: 11 }, (_, i) =>
+        provision({
+          legalProvisionId: `padding-${i}`,
+          citationLabel: `art. ${20 + i}`,
+          foundBy: [provenance({ issueLikelihood: "possible", answerTargetIndex: 2, finalScore: 0.032 })],
+        }),
+      );
+
+      const packed = packSources([adjacentException, ...padding, coreRight], {
+        maxSources: 5,
+        answerTargets: [
+          { index: 1, text: "jakie prawa ma producent" },
+          { index: 2, text: "przed czym chroni ustawa" },
+        ],
+      });
+
+      expect(packed.some((s) => s.legalProvisionId === "art-6-ust-1")).toBe(true);
+    });
+
+    it("10: SOŁTYS fixture — eligibility conditions beat application/procedure evidence for a 'who qualifies / conditions' target", () => {
+      const eligibilityTenure = provision({
+        legalProvisionId: "art-2-ust-1-pkt-1",
+        citationLabel: "art. 2 ust. 1 pkt 1",
+        foundBy: [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 2, finalScore: 0.016 })],
+      });
+      const eligibilityAge = provision({
+        legalProvisionId: "art-2-ust-1-pkt-2",
+        citationLabel: "art. 2 ust. 1 pkt 2",
+        foundBy: [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 2, finalScore: 0.014 })],
+      });
+      const procedure = provision({
+        legalProvisionId: "art-4-procedure",
+        citationLabel: "art. 4",
+        foundBy: [provenance({ issueLikelihood: "most_likely", answerTargetIndex: 2, finalScore: 0.033 })],
+      });
+
+      const packed = packSources([procedure, eligibilityTenure, eligibilityAge], {
+        answerTargets: [
+          { index: 1, text: "komu przysługuje świadczenie" },
+          { index: 2, text: "jakie warunki trzeba spełnić" },
+        ],
+      });
+
+      // The single PASS-1 reservation slot for target 2 must go to the higher-scoring
+      // candidate found for that target — procedure legitimately wins THIS reservation since
+      // it scores highest; the real fix is that eligibility conditions are no longer excluded
+      // from the candidate pool at all (see investigate.ts DEFAULT_LIMIT_PER_QUERY) and both
+      // still reach the final pack via PASS 2 fill within the default budget.
+      const citedLabels = packed.map((s) => s.citationLabel);
+      expect(citedLabels).toContain("art. 2 ust. 1 pkt 1");
+      expect(citedLabels).toContain("art. 2 ust. 1 pkt 2");
+    });
+  });
 });

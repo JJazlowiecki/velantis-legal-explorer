@@ -47,11 +47,25 @@ interface ProvisionRow {
   citationLabel: string;
 }
 
-function resolveAncestorHeadings(
+/**
+ * Same rule as hydrate.ts's formatAncestorContext (kept in sync deliberately, not merged into
+ * a shared module, since the two operate on different row shapes): an ancestor's own operative
+ * TEXT is carried into the embedded document only when it would itself pass
+ * isSearchableProvision — i.e. it has independent normative content, not just a bare heading
+ * marker like "1." Root-caused live: a list-item provision under an introductory clause (e.g.
+ * "1. Świadczenie przysługuje osobie, która spełnia łącznie następujące warunki:" with children
+ * "1) ...7 lat" / "2) wiek...") previously carried forward only the parent's heading ("1."),
+ * silently dropping the exact framing sentence ("warunki") that makes the child semantically
+ * findable for a "jakie warunki" query — a general child/parent-fragmentation recall defect,
+ * not specific to any one act. A systematic container (division/chapter/...) or a
+ * heading-duplicate article still contributes only its heading, exactly as before and exactly
+ * matching what is (and isn't) ever surfaced as retrievable evidence elsewhere.
+ */
+function resolveAncestorContext(
   provisionId: string | null,
   byId: Map<string, ProvisionRow>,
 ): string[] {
-  const headings: string[] = [];
+  const context: string[] = [];
   let currentId = provisionId;
   const visited = new Set<string>();
 
@@ -66,11 +80,15 @@ function resolveAncestorHeadings(
       break;
     }
 
-    headings.push(provision.heading ?? provision.citationLabel);
+    context.push(
+      isSearchableProvision(provision)
+        ? `${provision.citationLabel} — ${provision.text.trim()}`
+        : (provision.heading ?? provision.citationLabel),
+    );
     currentId = provision.parentProvisionId;
   }
 
-  return headings.reverse();
+  return context.reverse();
 }
 
 export async function indexLegalSearchDocuments(
@@ -116,7 +134,7 @@ export async function indexLegalSearchDocuments(
   const searchableRows = provisionRows.filter((row) => isSearchableProvision(row));
 
   const drafts = searchableRows.map((row) => {
-    const ancestorHeadings = resolveAncestorHeadings(row.parentProvisionId, byId);
+    const ancestorHeadings = resolveAncestorContext(row.parentProvisionId, byId);
     const content = buildSearchDocumentContent({
       actTitle: version.actTitle,
       ancestorHeadings,
