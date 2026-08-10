@@ -66,6 +66,8 @@ export interface ResolvedExplorerCorpus {
   corpusRunId: string | null;
   rulesetVersion: string | null;
   effectiveAsOf: string | null;
+  /** The resolved run's own selectionHash (see current_law_corpus_runs) — provenance/validation metadata, e.g. for the verified legal answer cache. Null in test mode. */
+  corpusSelectionHash: string | null;
 }
 
 /**
@@ -98,5 +100,6 @@ export async function resolveCurrentCorpus(input: {
     corpusRunId: run.runId,
     rulesetVersion: run.rulesetVersion,
     effectiveAsOf: run.effectiveAsOf,
+    corpusSelectionHash: run.selectionHash,
   };
 }

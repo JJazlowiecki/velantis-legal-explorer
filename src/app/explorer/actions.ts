@@ -3,6 +3,7 @@
 import { getDb } from "@/db";
 import { getServerEnv } from "@/lib/env/server";
 import { answerLegalProblem } from "@/lib/legal/answer/answer";
+import { lookupVerifiedAnswer, recordVerifiedAnswer } from "@/lib/explorer/cache/service";
 import {
   CurrentCorpusNotReadyError,
   parseExplorerTestCorpusVersionIds,
@@ -61,6 +62,7 @@ export async function submitExplorerQuery(query: string): Promise<ExplorerSearch
           corpusRunId: null,
           rulesetVersion: null,
           effectiveAsOf: null,
+          corpusSelectionHash: null,
         };
       }
 
@@ -78,6 +80,11 @@ export async function submitExplorerQuery(query: string): Promise<ExplorerSearch
     answerLegalProblem,
     getDb,
     recordHistoryEntry: env.EXPLORER_HISTORY_ENABLED ? recordHistoryEntry : undefined,
+    // Both no-op automatically outside CURRENT corpus mode (see hasCurrentCorpusIdentity in
+    // cache/service.ts) — safe to always wire, no mode branch needed here.
+    lookupCachedAnswer: ({ question, corpus }) => lookupVerifiedAnswer({ db: getDb(), question, corpus }),
+    recordCachedAnswer: ({ question, corpus, result, view }) =>
+      recordVerifiedAnswer({ db: getDb(), question, corpus, result, view }),
   };
 
   return runExplorerQuery(query, deps);
