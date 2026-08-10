@@ -359,11 +359,13 @@ function wrapAnnouncementDocument(options: {
   preambleArticleId?: string;
   annexHeading?: string;
   annexArticleId?: string;
+  annexBodyText?: string;
   extraAnnexSectionId?: string;
 }): string {
   const preambleArticleId = options.preambleArticleId ?? "pass_1";
   const annexHeading = options.annexHeading ?? "Załącznik&nbsp;&nbsp;-&nbsp;&nbsp;Tekst jednolity ustawy z dnia 1 stycznia 2000&nbsp;r. Ustawa testowa";
   const annexArticleId = options.annexArticleId ?? "arti_1";
+  const annexBodyText = options.annexBodyText ?? "Consolidated statute text.";
 
   const extraSection = options.extraAnnexSectionId
     ? `
@@ -399,7 +401,7 @@ function wrapAnnouncementDocument(options: {
           <div class="block">
             <div class="unit unit_arti pro-text false" id="${annexArticleId}" data-id="${annexArticleId}">
               <h3 CLASS="pro-none"><B CLASS="b">Art.&nbsp;1.</B></h3>
-              <div class="unit-inner"><div data-template="xText" CLASS="pro-text">Consolidated statute text.</div></div>
+              <div class="unit-inner"><div data-template="xText" CLASS="pro-text">${annexBodyText}</div></div>
             </div>
           </div>
         </div>
@@ -454,5 +456,109 @@ describe("parseActStructureHtml — mode: consolidated_annex", () => {
 
     expect(texts.some((text) => text.includes("Preamble text"))).toBe(true);
     expect(texts.some((text) => text.includes("Consolidated statute text"))).toBe(false);
+  });
+});
+
+/**
+ * Real Sejm/ISAP legislative-footnote markup (confirmed against the live DU/2024/1769
+ * database-protection act and DU/2024/1782 blood-service act documents): the reference marker
+ * and the full footnote body are both nested INSIDE the annotated element via
+ * `<a class="gloss-link tooltip">`. Used below to reproduce the exact real-world contamination
+ * pattern, never an invented/simplified shape.
+ */
+function glossLink(marker: string, body: string): string {
+  return `<a class="gloss-link tooltip" href="#gloss-0:1:"><sup>${marker}</sup><span class="tooltip-text"><span class="pro-gloss-inner">${body}</span></span></a>`;
+}
+
+describe("parseActStructureHtml — legislative-footnote gloss-link exclusion", () => {
+  it("1: a structural annex heading contaminated with a footnote gloss is parsed as a short structural heading", () => {
+    const annexHeading = `Załącznik&nbsp;&nbsp;-&nbsp;&nbsp;Tekst jednolity ustawy z dnia 1 stycznia 2000&nbsp;r. Ustawa testowa${glossLink("1)", "Niniejsza ustawa dokonuje w zakresie swojej regulacji wdrożenia dyrektywy 96/9/WE.")}`;
+    const html = wrapAnnouncementDocument({ annexHeading });
+    const result = parseActStructureHtml(html, "consolidated_annex");
+
+    const root = result.find((node) => node.provisionType === "part");
+    expect(root?.heading).toBe("Załącznik - Tekst jednolity ustawy z dnia 1 stycznia 2000 r. Ustawa testowa");
+    expect(root?.heading).not.toContain("dyrektywy");
+    expect(root?.heading?.length).toBeLessThan(100);
+  });
+
+  it("2: the adjacent legislative footnote / transposition note is NOT appended to the heading", () => {
+    const annexHeading = `Załącznik&nbsp;&nbsp;-&nbsp;&nbsp;Tekst jednolity ustawy z dnia 1 stycznia 2000&nbsp;r. Ustawa testowa${glossLink("1)", "Niniejsza ustawa dokonuje w zakresie swojej regulacji wdrożenia dyrektywy 96/9/WE z dnia 11 marca 1996 r.")}`;
+    const html = wrapAnnouncementDocument({ annexHeading });
+    const result = parseActStructureHtml(html, "consolidated_annex");
+
+    const root = result.find((node) => node.provisionType === "part");
+    expect(root?.heading).not.toContain("Niniejsza ustawa dokonuje");
+    expect(root?.heading).not.toContain("96/9/WE");
+  });
+
+  it("3: footnote text is not accidentally promoted into an operative child provision's own text", () => {
+    const html = wrapAnnouncementDocument({
+      annexBodyText: `Producent jest przedsiębiorcą w rozumieniu odrębnych przepisów, z późn. zm.${glossLink("3)", "Zmiany wymienionej ustawy zostały ogłoszone w Dz. U. z 2000 r. poz. 958.")}`,
+    });
+    const result = parseActStructureHtml(html, "consolidated_annex");
+
+    const article = result.find((node) => node.provisionType === "article");
+    expect(article?.text).toContain("Producent jest przedsiębiorcą w rozumieniu odrębnych przepisów, z późn. zm.");
+    expect(article?.text).not.toContain("Zmiany wymienionej ustawy");
+    expect(article?.text).not.toContain("2000 r. poz. 958");
+  });
+
+  it("4: a normal annex WITHOUT any footnote remains completely unchanged", () => {
+    const result = parseActStructureHtml(wrapAnnouncementDocument({}), "consolidated_annex");
+    const root = result.find((node) => node.provisionType === "part");
+    expect(root?.heading).toBe("Załącznik - Tekst jednolity ustawy z dnia 1 stycznia 2000 r. Ustawa testowa");
+  });
+
+  it("5: a legitimate long heading with NO gloss-link is preserved in full, never truncated by length", () => {
+    const longHeading =
+      "Załącznik - Tekst jednolity ustawy z dnia 1 stycznia 2000 r. o bardzo długim i szczegółowym tytule ustawy testowej, który nie zawiera żadnego przypisu ani odnośnika, a mimo to jest znacznie dłuższy niż typowy tytuł ustawy";
+    const result = parseActStructureHtml(wrapAnnouncementDocument({ annexHeading: longHeading }), "consolidated_annex");
+    const root = result.find((node) => node.provisionType === "part");
+    expect(root?.heading).toBe(longHeading);
+    expect(root?.heading?.length).toBeGreaterThan(150);
+  });
+
+  it("6: sołtys-style operative parent framing (no gloss-link) remains fully available as operative text", () => {
+    const html = wrapAnnouncementDocument({
+      annexBodyText: "Świadczenie przysługuje osobie, która spełnia łącznie następujące warunki:",
+    });
+    const result = parseActStructureHtml(html, "consolidated_annex");
+    const article = result.find((node) => node.provisionType === "article");
+    expect(article?.text).toContain("Świadczenie przysługuje osobie, która spełnia łącznie następujące warunki:");
+  });
+
+  it("7: unit_pass (ustęp/clause) parsing behavior remains intact alongside gloss-link exclusion", () => {
+    const html = wrapDocument(`
+      <div class="unit unit_arti pro-text false" id="arti_1" data-id="arti_1">
+        <h3 CLASS="pro-none"><B CLASS="b">Art.&nbsp;1.</B></h3>
+        <div class="unit-inner">
+          <div class="unit unit_pass pro-text false" id="pass_1" data-id="pass_1">
+            <h3 CLASS="pro-none"><B CLASS="b">1.</B></h3>
+            <div class="unit-inner">
+              <div data-template="xText" CLASS="pro-text">Tekst ustępu z przypisem.${glossLink("2)", "Przypis nieistotny.")}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `);
+    const result = parseActStructureHtml(html);
+    const clause = result.find((node) => node.provisionType === "clause");
+    expect(clause).toBeDefined();
+    expect(clause?.citationLabel).toBe("art. 1 ust. 1");
+    expect(clause?.text).toContain("Tekst ustępu z przypisem.");
+    expect(clause?.text).not.toContain("Przypis nieistotny");
+  });
+
+  it("8: parser output remains deterministic — parsing the same gloss-link-contaminated source twice yields identical text/heading", () => {
+    const annexHeading = `Załącznik&nbsp;&nbsp;-&nbsp;&nbsp;Tekst jednolity ustawy z dnia 1 stycznia 2000&nbsp;r. Ustawa testowa${glossLink("1)", "Nota wdrożeniowa.")}`;
+    const html = wrapAnnouncementDocument({ annexHeading });
+    const result1 = parseActStructureHtml(html, "consolidated_annex");
+    const result2 = parseActStructureHtml(html, "consolidated_annex");
+
+    const root1 = result1.find((node) => node.provisionType === "part");
+    const root2 = result2.find((node) => node.provisionType === "part");
+    expect(root1?.heading).toBe(root2?.heading);
+    expect(result1.map((n) => n.text)).toEqual(result2.map((n) => n.text));
   });
 });

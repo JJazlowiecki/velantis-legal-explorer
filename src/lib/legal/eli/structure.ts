@@ -88,6 +88,7 @@ function extractLocalNumber(dataId: string): string {
   return underscoreIndex === -1 ? dataId : dataId.slice(underscoreIndex + 1);
 }
 
+
 export function parseActStructureHtml(
   html: string,
   mode: StructureParseMode = "direct",
@@ -95,6 +96,32 @@ export function parseActStructureHtml(
   const $ = cheerio.load(html);
   const results: ParsedProvision[] = [];
   let ordinal = 0;
+
+  /**
+   * The official Sejm/ISAP renderer attaches legislative footnotes (amendment-history notes,
+   * EU-directive-transposition notes, "ustawa została ogłoszona..." publication notes, etc.) to
+   * the exact word/phrase they annotate via `<a class="gloss-link tooltip">`, which nests BOTH
+   * the footnote's reference marker (`<sup>N)</sup>`) and its full body text
+   * (`<span class="tooltip-text"><span class="pro-gloss-inner">...</span></span>`) INSIDE the
+   * element being annotated — confirmed against the real DU/2024/1769 (database-protection act)
+   * and DU/2024/1782 (blood-service act) documents, where this occurs both inside heading
+   * `<h2>`/`<h3>` elements (root annex heading, up to 1683 chars observed live) and inside
+   * operative `xText` body divs, mid-sentence with no separating space (e.g. "...z późn.
+   * zm.3)Zmiany wymienionej ustawy..." — confirmed already present, pre-fix, in the live
+   * `legal_provisions.text` for art. 5 pkt 5 / art. 16 ust. 1 / art. 17 of the database act, and
+   * observed in all five currently-pinned acts' operative text).
+   *
+   * cheerio's plain `.text()` recursively concatenates ALL descendant text nodes, so it silently
+   * pulls the entire footnote body into whatever heading/operative text it's building. This is a
+   * generic, semantically-marked ELI/ISAP rendering convention — not a malformed one-off
+   * document — so the fix is generic: strip `a.gloss-link` (marker + tooltip body together;
+   * they are one annotation unit, never legally operative) before reading `.text()`, applied
+   * uniformly everywhere text is extracted from markup. Never a length-based heuristic, never
+   * act-specific.
+   */
+  function textExcludingGlossLinks(el: ReturnType<typeof $>): string {
+    return el.clone().find("a.gloss-link").remove().end().text();
+  }
   // Real ISAP/Sejm source documents occasionally reuse a data-id within the same parent (a
   // renumbered/repealed-then-reinstated article observed in DU/1964/93 itself: two distinct
   // <div> elements both carrying data-id="arti_538" under the same parent). structuralPath only
@@ -139,9 +166,9 @@ export function parseActStructureHtml(
     const structuralPath = uniquePath(parentPath ? `${parentPath}/${dataId}` : dataId, ordinal);
 
     const headingEl = el.children("h3, h2").first();
-    const paragraphs = headingEl.find("P").toArray().map((p) => normalizeText($(p).text()));
-    const numberLine = paragraphs[0] ?? normalizeText(headingEl.text());
-    const subtitleText = normalizeText(headingEl.find(".pro-title-unit").text());
+    const paragraphs = headingEl.find("P").toArray().map((p) => normalizeText(textExcludingGlossLinks($(p))));
+    const numberLine = paragraphs[0] ?? normalizeText(textExcludingGlossLinks(headingEl));
+    const subtitleText = normalizeText(textExcludingGlossLinks(headingEl.find(".pro-title-unit")));
 
     let heading: string;
     let citationLabel: string;
@@ -189,7 +216,7 @@ export function parseActStructureHtml(
     const ownTextParts = unitInner
       .children('div[data-template="xText"]')
       .toArray()
-      .map((node) => normalizeText($(node).text()))
+      .map((node) => normalizeText(textExcludingGlossLinks($(node))))
       .filter((part) => part.length > 0);
     const ownText = ownTextParts.join(" ");
 
@@ -221,7 +248,7 @@ export function parseActStructureHtml(
     rootSection = $(".parts > section").first();
   } else {
     const candidates = $(".parts > section").filter((_, el) => {
-      const headingText = normalizeText($(el).children(".part").first().children("h2").first().text());
+      const headingText = normalizeText(textExcludingGlossLinks($(el).children(".part").first().children("h2").first()));
       return CONSOLIDATED_ANNEX_HEADING_PATTERN.test(headingText);
     });
 
@@ -249,7 +276,7 @@ export function parseActStructureHtml(
   const rootId = randomUUID();
   const rootStructuralPath = rootSection.attr("id") ?? "part_1";
   usedPaths.add(rootStructuralPath);
-  const rootHeadingText = normalizeText(rootPartDiv.children("h2").first().text()) || "Treść ustawy";
+  const rootHeadingText = normalizeText(textExcludingGlossLinks(rootPartDiv.children("h2").first())) || "Treść ustawy";
   ordinal += 1;
   results.push({
     id: rootId,
