@@ -64,4 +64,42 @@ describe("computeParsedContentHash", () => {
 		const rowB = { ...ART_6 }; // a distinct object, same semantic content
 		expect(computeParsedContentHash([rowA])).toBe(computeParsedContentHash([rowB]));
 	});
+
+	// The exact real-world gloss-link footnote-exclusion fix (structure.ts): a root "part"
+	// heading/text field previously contaminated with an inline legislative-footnote gloss (the
+	// real DU/2024/1769 database-protection act shape), vs. the corrected parse with the
+	// gloss-link's marker+tooltip body excluded.
+	const MALFORMED_ANNEX_ROOT: ContentHashableProvision = {
+		structuralPath: "part_2",
+		provisionType: "part",
+		citationLabel:
+			"Załącznik - Tekst jednolity ustawy z dnia 1 stycznia 2000 r. Ustawa testowa1)Niniejsza ustawa dokonuje wdrożenia dyrektywy 96/9/WE.",
+		heading:
+			"Załącznik - Tekst jednolity ustawy z dnia 1 stycznia 2000 r. Ustawa testowa1)Niniejsza ustawa dokonuje wdrożenia dyrektywy 96/9/WE.",
+		text:
+			"Załącznik - Tekst jednolity ustawy z dnia 1 stycznia 2000 r. Ustawa testowa1)Niniejsza ustawa dokonuje wdrożenia dyrektywy 96/9/WE.",
+		article: null,
+		paragraph: null,
+		point: null,
+		letter: null,
+	};
+
+	const CORRECTED_ANNEX_ROOT: ContentHashableProvision = {
+		...MALFORMED_ANNEX_ROOT,
+		citationLabel: "Załącznik - Tekst jednolity ustawy z dnia 1 stycznia 2000 r. Ustawa testowa",
+		heading: "Załącznik - Tekst jednolity ustawy z dnia 1 stycznia 2000 r. Ustawa testowa",
+		text: "Załącznik - Tekst jednolity ustawy z dnia 1 stycznia 2000 r. Ustawa testowa",
+	};
+
+	it("9: contentHash changes when correcting an already-malformed parsed structure (gloss-link footnote fix)", () => {
+		const beforeFix = computeParsedContentHash([MALFORMED_ANNEX_ROOT, ART_6]);
+		const afterFix = computeParsedContentHash([CORRECTED_ANNEX_ROOT, ART_6]);
+		expect(beforeFix).not.toBe(afterFix);
+	});
+
+	it("10: the same corrected source parsed twice produces the SAME hash — re-ingestion would idempotently reuse the one new immutable revision, never create version churn", () => {
+		const firstParse = computeParsedContentHash([CORRECTED_ANNEX_ROOT, ART_6]);
+		const secondParse = computeParsedContentHash([{ ...CORRECTED_ANNEX_ROOT }, { ...ART_6 }]);
+		expect(firstParse).toBe(secondParse);
+	});
 });
