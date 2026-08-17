@@ -34,4 +34,20 @@ export const CURRENT_LAW_BOOTSTRAP_SCOPE: CurrentLawCorpusScopeEntry[] = [
 	{ sourceId: "DU/1964/59", label: "Kodeks rodzinny i opiekuńczy (KRO)" },
 	{ sourceId: "DU/2014/827", label: "Ustawa o prawach konsumenta" },
 	{ sourceId: "DU/2007/331", label: "Ustawa o ochronie konkurencji i konsumentów (UOKiK)" },
+
+	// Corpus Expansion v3 targets. Live ELI reference research (2026-08-17) confirmed zero
+	// effective post-TJ amendments and zero unresolved TK relations for all six as of their
+	// latest official TJ — expected to pass Model A. Prepared via --current-only (latest
+	// authoritative consolidated text only, no historical chain).
+	{ sourceId: "DU/2001/733", label: "Ustawa o ochronie praw lokatorów" },
+	// DU/1994/388 (Ustawa o własności lokali) was evaluated but its --current-only preparation
+	// fails closed: an old (2000) chain announcement's ELI record has no `promulgation` field at
+	// all, so the latest-announcement resolver correctly refuses to guess. A systemic gap in
+	// very old ELI records, not act-specific — recorded and excluded per this milestone's scope,
+	// not patched here.
+	{ sourceId: "DU/2011/715", label: "Ustawa o kredycie konsumenckim" },
+	{ sourceId: "DU/1982/147", label: "Ustawa o księgach wieczystych i hipotece" },
+	{ sourceId: "DU/2003/535", label: "Prawo upadłościowe" },
+	{ sourceId: "DU/2002/1270", label: "Prawo o postępowaniu przed sądami administracyjnymi (PSA)" },
+	{ sourceId: "DU/2015/978", label: "Prawo restrukturyzacyjne" },
 ];
