@@ -125,13 +125,13 @@ export const LEGAL_ANSWER_EVAL_QUESTIONS: LegalAnswerEvalQuestion[] = [
     note: "Zero legal issues expected.",
   },
   {
-    id: "outside-corpus-kc",
+    id: "outside-corpus-kpc",
     category: "J_outside_corpus_scope",
-    query: "Jakie są przesłanki odpowiedzialności odszkodowawczej za czyn niedozwolony według Kodeksu cywilnego?",
+    query: "Jaki sąd jest właściwy do rozpoznania sprawy cywilnej według Kodeksu postępowania cywilnego?",
     expectedStatus: "insufficient_evidence",
     expectedCentralCitations: [],
     isNamedRegression: false,
-    note: "KC is not in the 5-act corpus (excluded, no structured current TJ) — must fail safely, never fabricate from an excluded/historical act.",
+    note: "KC was here through Corpus Expansion v1 but is now legitimately included (generic TK-effect absorption), so this fixture no longer tests an outside-corpus safety case for it. Swapped to KPC (Corpus Expansion v2 target), which is genuinely still excluded — its newest official TJ PDF hits a real parser boundary, so it has no structured current version — must fail safely, never fabricate from an excluded/historical act.",
   },
   {
     id: "outside-corpus-kk",

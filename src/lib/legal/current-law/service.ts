@@ -156,7 +156,14 @@ async function loadCandidateInput(
 		.filter((r) => r.relationType === "post_consolidated_amendment" && r.relatedLegalActId)
 		.map((r) => r.relatedLegalActId as string);
 
-	const relatedActIds = [...new Set([...announcementIds, ...amendmentIds])];
+	// Constitutional Tribunal relation targets need the same metadata (entryIntoForceDate) as
+	// amendment targets — select.ts resolves each one generically against the selected TJ's
+	// legalStateDate rather than blocking on relation existence alone.
+	const tkIds = baseRelations
+		.filter((r) => r.relationType === "constitutional_tribunal" && r.relatedLegalActId)
+		.map((r) => r.relatedLegalActId as string);
+
+	const relatedActIds = [...new Set([...announcementIds, ...amendmentIds, ...tkIds])];
 	const relatedActsById = new Map<
 		string,
 		{ sourceId: string; promulgationDate: string | null; expirationDate: string | null; entryIntoForceDate: string | null }

@@ -265,13 +265,44 @@ export function evaluateCurrentLawCandidate(
 		});
 	}
 
-	const tkHit = baseActiveRelations.find((r) => r.relationType === "constitutional_tribunal");
-	if (tkHit) {
-		return outcome(legalAct.id, "excluded", "unresolved_constitutional_tribunal_effect", null, {
-			effectiveAsOf,
-			selectedVersionId: selectedVersion.id,
-			amendmentChecks,
-			checks: { relatedSourceId: tkHit.relatedSourceId },
+	// Step 8: a Constitutional Tribunal relation on the base act is "absorbed" — does not block
+	// inclusion — iff its related act's entryIntoForceDate (the ruling's actual legal-effect
+	// date, correctly handling a deferred/postponed effect, never its publication date) is on or
+	// before the SELECTED TJ version's legalStateDate. That date is the government's own
+	// certified "state of law" declaration (art. 16 ustawy o ogłaszaniu aktów normatywnych
+	// requires it to already reflect every TK effect as of that date) — so this defers entirely
+	// to the official record and never interprets a ruling's substance. Every TK relation is
+	// checked individually; any one unresolved relation fails the whole act closed.
+	const tkRelations = baseActiveRelations.filter((r) => r.relationType === "constitutional_tribunal");
+	const tkChecks: Array<Record<string, unknown>> = [];
+	for (const rel of tkRelations) {
+		const info = rel.relatedLegalActId ? relatedActsById.get(rel.relatedLegalActId) : undefined;
+		if (!rel.relatedLegalActId || !info || info.entryIntoForceDate === null || selectedVersion.legalStateDate === null) {
+			tkChecks.push({ relatedSourceId: rel.relatedSourceId, resolved: false });
+			return outcome(legalAct.id, "excluded", "unresolved_constitutional_tribunal_effect", null, {
+				effectiveAsOf,
+				selectedVersionId: selectedVersion.id,
+				amendmentChecks,
+				tkChecks,
+			});
+		}
+		if (info.entryIntoForceDate > selectedVersion.legalStateDate) {
+			tkChecks.push({
+				relatedSourceId: rel.relatedSourceId,
+				entryIntoForceDate: info.entryIntoForceDate,
+				resolved: false,
+			});
+			return outcome(legalAct.id, "excluded", "unresolved_constitutional_tribunal_effect", null, {
+				effectiveAsOf,
+				selectedVersionId: selectedVersion.id,
+				amendmentChecks,
+				tkChecks,
+			});
+		}
+		tkChecks.push({
+			relatedSourceId: rel.relatedSourceId,
+			entryIntoForceDate: info.entryIntoForceDate,
+			resolved: true,
 		});
 	}
 
@@ -285,6 +316,7 @@ export function evaluateCurrentLawCandidate(
 		// than one parser output ever existed for the same official text.
 		contentRevisionCandidateCount: validMatches.length,
 		amendmentChecks,
+		tkChecks,
 		amendmentRelationsSource: "announcement",
 		correctionTkRelationsSource: "base_act_and_announcement",
 	});
