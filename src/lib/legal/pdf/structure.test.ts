@@ -152,6 +152,28 @@ describe("parseConsolidatedPdfText", () => {
     const paths = result.map((p) => p.structuralPath);
     expect(new Set(paths).size).toBe(paths.length);
   });
+
+  // Verified live against DU/2026/236 (KRO), DU/2025/1714 (UOKiK), and DU/2025/277 (KP) — every
+  // recent obwieszczenie's own preamble quotes the amending act's transitional/entry-into-force
+  // provisions verbatim (e.g. "„Art. 2. ... Art. 3. Ustawa wchodzi w życie ...”"), BEFORE the real
+  // annex heading. This is never a parser format change (the annex heading pattern/rendering is
+  // identical to older TJs, confirmed live) — it's a pre-existing case the annexIndex slice
+  // already handles correctly, now locked in by a regression test using the real document shape.
+  it("never includes preamble content (incl. fake-looking 'Art. N.' quotes) that appears BEFORE the annex heading", () => {
+    const result = parseConsolidatedPdfText([
+      line(1, "OBWIESZCZENIE"),
+      line(1, "2. Podany w załączniku do niniejszego obwieszczenia tekst jednolity ustawy nie obejmuje art. 2 i art. 3 ustawy:"),
+      line(1, "„Art. 2. Jeżeli termin ... nie upłynął, podlega on wydłużeniu do roku."),
+      line(1, "Art. 3. Ustawa wchodzi w życie po upływie 3 miesięcy od dnia ogłoszenia.”."),
+      line(2, "Dziennik Ustaw – 2 – Poz. 236"),
+      line(2, "2026-03-02"),
+      line(2, "Załącznik do obwieszczenia Marszałka Sejmu Rzeczypospolitej", 8),
+      line(2, "Polskiej z dnia 20 lutego 2026 r. (Dz. U. poz. 236)", 8),
+      line(2, "Art. 1. Treść realnego przepisu."),
+    ]);
+    expect(result.map((p) => p.citationLabel)).toEqual(["art. 1"]);
+    expect(result[0].text).toBe("Art. 1. Treść realnego przepisu.");
+  });
 });
 
 describe("stripBoilerplateAndFootnotes", () => {
