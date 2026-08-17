@@ -9,6 +9,7 @@ import { CURRENT_LAW_BOOTSTRAP_SCOPE } from "../lib/legal/current-law/bootstrap-
 import { fetchEliActMetadata, fetchEliActReferences } from "../lib/legal/eli/client";
 import { ConsolidatedIngestError, ingestOfficialConsolidatedStructure } from "../lib/legal/eli/consolidated-ingest";
 import { ingestEliActMetadata } from "../lib/legal/eli/ingest";
+import { resolveLatestAnnouncementSourceId } from "../lib/legal/eli/latest-announcement";
 import { ELI_SOURCE } from "../lib/legal/eli/schema";
 import { ingestOfficialConsolidatedPdf, PdfConsolidatedIngestError } from "../lib/legal/pdf/pdf-ingest";
 import { indexLegalSearchDocuments } from "../lib/legal/search/indexing";
@@ -25,7 +26,7 @@ function parseSourceId(sourceId: string): { publisher: string; year: number; pos
 }
 
 function printUsage() {
-	console.error("Usage: pnpm corpus:prepare [--only <sourceId>]");
+	console.error("Usage: pnpm corpus:prepare [--only <sourceId>] [--current-only]");
 }
 
 async function main() {
@@ -37,10 +38,13 @@ async function main() {
 	try {
 		const argv = process.argv.slice(2);
 		let only: string | undefined;
+		let currentOnly = false;
 		for (let i = 0; i < argv.length; i += 1) {
 			if (argv[i] === "--only") {
 				only = argv[i + 1];
 				i += 1;
+			} else if (argv[i] === "--current-only") {
+				currentOnly = true;
 			}
 		}
 
@@ -82,43 +86,67 @@ async function main() {
 					);
 				console.log(`announcement chain: ${announcementChain.length} entr${announcementChain.length === 1 ? "y" : "ies"}`);
 
+				// --current-only: resolve which single announcement is the most-recently-promulgated
+				// one via a plain metadata fetch (see resolveLatestAnnouncementSourceId) BEFORE the
+				// main loop, then skip structure/index ingestion for every other chain entry below.
+				// `structureTargetSourceId === undefined` means "prepare the whole chain" (default
+				// behavior, byte-for-byte unchanged) — current-only is opt-in. Resolution fails
+				// CLOSED: any single unresolved chain entry (fetch failure or missing/unusable
+				// promulgation date) throws and aborts this act entirely (caught by the per-act
+				// try/catch below) — it never falls back to full-chain ingestion and never selects
+				// from a partially resolved chain.
+				let structureTargetSourceId: string | undefined;
+				if (currentOnly) {
+					structureTargetSourceId = await resolveLatestAnnouncementSourceId(
+						announcementChain.map((c) => c.relatedSourceId),
+						fetchEliActMetadata,
+						parseSourceId,
+					);
+					console.log(`--current-only: latest announcement is ${structureTargetSourceId} — structure/index ingestion limited to it`);
+				}
+
 				for (const chainEntry of announcementChain) {
 					const announcementSourceId = chainEntry.relatedSourceId;
+					const shouldIngestStructure = structureTargetSourceId === undefined || structureTargetSourceId === announcementSourceId;
 					try {
-						// Generic resource-capability rule (Phase 9 — never act-ID-special-cased): the
-						// announcement's own ELI metadata says which representation is actually
-						// available for THIS exact announcement. Most acts still publish text.html and
-						// take that (unchanged, historically-proven) path; an announcement with
-						// textHTML=false falls back to the official PDF "T" attachment instead — same
-						// provenance verification, same immutable-revision identity either way.
-						const announcementCoords = (() => {
-							const [publisher, yearStr, positionStr] = announcementSourceId.split("/");
-							return { publisher, year: Number(yearStr), position: Number(positionStr) };
-						})();
-						const announcementMetadata = await fetchEliActMetadata(announcementCoords);
-
-						if (announcementMetadata.textHTML) {
-							const result = await ingestOfficialConsolidatedStructure({
-								db,
-								baseActSourceId: scopeEntry.sourceId,
-								announcementActSourceId: announcementSourceId,
-							});
-							console.log(
-								`  ${announcementSourceId}: structure OK via HTML (version=${result.legalActVersionId}, ${result.insertedCount} provisions)`,
-							);
-							versionsToIndex.add(result.legalActVersionId);
-						} else if (announcementMetadata.textPDF) {
-							const result = await ingestOfficialConsolidatedPdf({
-								db,
-								baseActSourceId: scopeEntry.sourceId,
-								announcementActSourceId: announcementSourceId,
-							});
-							console.log(
-								`  ${announcementSourceId}: structure OK via PDF (version=${result.legalActVersionId}, ${result.insertedCount} provisions, source=${result.sourcePdfUrl})`,
-							);
-							versionsToIndex.add(result.legalActVersionId);
+						if (!shouldIngestStructure) {
+							console.log(`  ${announcementSourceId}: skipped (--current-only, not the latest announcement)`);
 						} else {
-							console.log(`  ${announcementSourceId}: no HTML or PDF text available from official source — skipping`);
+							// Generic resource-capability rule (Phase 9 — never act-ID-special-cased): the
+							// announcement's own ELI metadata says which representation is actually
+							// available for THIS exact announcement. Most acts still publish text.html and
+							// take that (unchanged, historically-proven) path; an announcement with
+							// textHTML=false falls back to the official PDF "T" attachment instead — same
+							// provenance verification, same immutable-revision identity either way.
+							const announcementCoords = (() => {
+								const [publisher, yearStr, positionStr] = announcementSourceId.split("/");
+								return { publisher, year: Number(yearStr), position: Number(positionStr) };
+							})();
+							const announcementMetadata = await fetchEliActMetadata(announcementCoords);
+
+							if (announcementMetadata.textHTML) {
+								const result = await ingestOfficialConsolidatedStructure({
+									db,
+									baseActSourceId: scopeEntry.sourceId,
+									announcementActSourceId: announcementSourceId,
+								});
+								console.log(
+									`  ${announcementSourceId}: structure OK via HTML (version=${result.legalActVersionId}, ${result.insertedCount} provisions)`,
+								);
+								versionsToIndex.add(result.legalActVersionId);
+							} else if (announcementMetadata.textPDF) {
+								const result = await ingestOfficialConsolidatedPdf({
+									db,
+									baseActSourceId: scopeEntry.sourceId,
+									announcementActSourceId: announcementSourceId,
+								});
+								console.log(
+									`  ${announcementSourceId}: structure OK via PDF (version=${result.legalActVersionId}, ${result.insertedCount} provisions, source=${result.sourcePdfUrl})`,
+								);
+								versionsToIndex.add(result.legalActVersionId);
+							} else {
+								console.log(`  ${announcementSourceId}: no HTML or PDF text available from official source — skipping`);
+							}
 						}
 					} catch (error) {
 						console.log(
