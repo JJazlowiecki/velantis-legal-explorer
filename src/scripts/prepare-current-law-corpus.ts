@@ -168,14 +168,42 @@ async function main() {
 					}
 				}
 
-				// Re-sync the base act's OWN relations now that every announcement/amendment act
+				// Sync metadata for every Constitutional Tribunal (TK) relation target on the BASE
+				// act — select.ts resolves each one generically (event entryIntoForceDate vs. the
+				// selected TJ's legalStateDate), which requires the SAME metadata (entryIntoForceDate)
+				// amendment targets already get. Only entryIntoForceDate/promulgationDate are needed
+				// (never the ruling's structural text), so this is a cheap metadata-only fetch, same
+				// pattern as the amendment sync above — never a bespoke per-ruling lookup.
+				const tkRelations = await db
+					.select({ relatedSourceId: legalActRelations.relatedSourceId })
+					.from(legalActRelations)
+					.where(
+						and(
+							eq(legalActRelations.legalActId, baseAct.id),
+							eq(legalActRelations.isActive, true),
+							eq(legalActRelations.relationType, "constitutional_tribunal"),
+						),
+					);
+				for (const tk of tkRelations) {
+					try {
+						const tkCoords = parseSourceId(tk.relatedSourceId);
+						await ingestEliActMetadata(tkCoords, { db });
+						console.log(`  TK ruling ${tk.relatedSourceId}: metadata synced`);
+					} catch (error) {
+						console.log(
+							`  TK ruling ${tk.relatedSourceId}: metadata FAILED — ${error instanceof Error ? error.message : "unknown error"}`,
+						);
+					}
+				}
+
+				// Re-sync the base act's OWN relations now that every announcement/amendment/TK act
 				// referenced above has been ingested — relation resolution (relatedLegalActId) only
 				// happens against whatever legal_acts rows exist AT SYNC TIME (see relations.ts), and
 				// the first sync above ran before those related acts existed. Without this second
 				// pass, every chain relation would be stuck with relatedLegalActId=null forever,
 				// which select.ts correctly (but needlessly) treats as metadata_incomplete.
 				await ingestEliActMetadata(coords, { fetchReferences: fetchEliActReferences, db });
-				console.log(`base relations re-synced (resolving announcement/amendment ids)`);
+				console.log(`base relations re-synced (resolving announcement/amendment/TK ids)`);
 
 				actOutcomes.push(`${scopeEntry.sourceId}: prepared (${announcementChain.length} announcements known)`);
 			} catch (error) {

@@ -281,7 +281,7 @@ describe("evaluateCurrentLawCandidate — Model A (pl-current-law-v1)", () => {
 		expect(result.reasonCode).toBe("correction_unresolved");
 	});
 
-	it("excludes with unresolved_constitutional_tribunal_effect for an active TK relation on the base act", () => {
+	it("excludes with unresolved_constitutional_tribunal_effect when a TK relation's relatedLegalActId is unresolved", () => {
 		const result = evaluateCurrentLawCandidate(
 			input({
 				baseActiveRelations: [
@@ -294,6 +294,122 @@ describe("evaluateCurrentLawCandidate — Model A (pl-current-law-v1)", () => {
 			EFFECTIVE_AS_OF,
 		);
 		expect(result.reasonCode).toBe("unresolved_constitutional_tribunal_effect");
+	});
+
+	const TK_ID = "tk-1";
+
+	function inputWithTk(
+		tkInfo: CurrentLawRelatedActInfo | undefined,
+		versionOverrides: Partial<CurrentLawVersionInput> = {},
+		extraTkRelations: CurrentLawRelationInput[] = [],
+	) {
+		const relatedActsById = new Map([[ANNOUNCEMENT_NEW_ID, relatedAct({ promulgationDate: "2024-01-01" })]]);
+		if (tkInfo) relatedActsById.set(TK_ID, tkInfo);
+		return input({
+			baseActiveRelations: [
+				announcementChainRelation(ANNOUNCEMENT_NEW_ID, "DU/2024/1"),
+				{ relationType: "constitutional_tribunal", relatedLegalActId: TK_ID, relatedSourceId: "DU/2020/1" },
+				...extraTkRelations,
+			],
+			relatedActsById,
+			versions: [tjVersion({ id: "v-new", sourceAnnouncementLegalActId: ANNOUNCEMENT_NEW_ID, ...versionOverrides })],
+		});
+	}
+
+	it("resolves a TK event whose entryIntoForceDate is ON the TJ's legalStateDate (boundary is inclusive)", () => {
+		const result = evaluateCurrentLawCandidate(
+			inputWithTk(relatedAct({ entryIntoForceDate: "2024-06-01" }), { legalStateDate: "2024-06-01" }),
+			EFFECTIVE_AS_OF,
+		);
+		expect(result.decision).toBe("included");
+		expect(result.legalActVersionId).toBe("v-new");
+	});
+
+	it("resolves a TK event whose effect predates the selected TJ's legalStateDate", () => {
+		const result = evaluateCurrentLawCandidate(
+			inputWithTk(relatedAct({ entryIntoForceDate: "2020-05-01" }), { legalStateDate: "2025-01-01" }),
+			EFFECTIVE_AS_OF,
+		);
+		expect(result.decision).toBe("included");
+		expect(result.reasonCode).toBe("authoritative_current");
+	});
+
+	it("does NOT resolve a TK event whose effect (e.g. a deferred effective date) is AFTER the selected TJ's legalStateDate", () => {
+		const result = evaluateCurrentLawCandidate(
+			inputWithTk(relatedAct({ entryIntoForceDate: "2022-01-01" }), { legalStateDate: "2021-06-01" }),
+			EFFECTIVE_AS_OF,
+		);
+		expect(result.decision).toBe("excluded");
+		expect(result.reasonCode).toBe("unresolved_constitutional_tribunal_effect");
+	});
+
+	it("fails closed when the TK event's entryIntoForceDate is unknown, even with a resolved relatedLegalActId", () => {
+		const result = evaluateCurrentLawCandidate(
+			inputWithTk(relatedAct({ entryIntoForceDate: null }), { legalStateDate: "2025-01-01" }),
+			EFFECTIVE_AS_OF,
+		);
+		expect(result.reasonCode).toBe("unresolved_constitutional_tribunal_effect");
+	});
+
+	it("fails closed when the selected TJ has no legalStateDate to compare against", () => {
+		const result = evaluateCurrentLawCandidate(
+			inputWithTk(relatedAct({ entryIntoForceDate: "2020-01-01" }), { legalStateDate: null }),
+			EFFECTIVE_AS_OF,
+		);
+		expect(result.reasonCode).toBe("unresolved_constitutional_tribunal_effect");
+	});
+
+	it("blocks on the single unresolved event even when another TK relation on the same act IS resolved", () => {
+		const result = evaluateCurrentLawCandidate(
+			inputWithTk(
+				relatedAct({ entryIntoForceDate: "2010-01-01" }), // resolved
+				{ legalStateDate: "2025-01-01" },
+				[{ relationType: "constitutional_tribunal", relatedLegalActId: null, relatedSourceId: "DU/2023/1" }], // unresolved
+			),
+			EFFECTIVE_AS_OF,
+		);
+		expect(result.decision).toBe("excluded");
+		expect(result.reasonCode).toBe("unresolved_constitutional_tribunal_effect");
+	});
+
+	it("older TJ (earlier legalStateDate) cannot absorb a later-effect TK event that a newer TJ could", () => {
+		const olderTjResult = evaluateCurrentLawCandidate(
+			inputWithTk(relatedAct({ entryIntoForceDate: "2024-01-01" }), { legalStateDate: "2023-01-01" }),
+			EFFECTIVE_AS_OF,
+		);
+		const newerTjResult = evaluateCurrentLawCandidate(
+			inputWithTk(relatedAct({ entryIntoForceDate: "2024-01-01" }), { legalStateDate: "2025-01-01" }),
+			EFFECTIVE_AS_OF,
+		);
+		expect(olderTjResult.reasonCode).toBe("unresolved_constitutional_tribunal_effect");
+		expect(newerTjResult.decision).toBe("included");
+	});
+
+	it("an act with no TK relations at all is unaffected by the TK resolution rule", () => {
+		const result = evaluateCurrentLawCandidate(
+			input({
+				baseActiveRelations: [announcementChainRelation(ANNOUNCEMENT_NEW_ID, "DU/2024/1")],
+				relatedActsById: new Map([[ANNOUNCEMENT_NEW_ID, relatedAct({ promulgationDate: "2024-01-01" })]]),
+				versions: [tjVersion({ id: "v-new", sourceAnnouncementLegalActId: ANNOUNCEMENT_NEW_ID })],
+			}),
+			EFFECTIVE_AS_OF,
+		);
+		expect(result.decision).toBe("included");
+	});
+
+	it("records the resolving TJ's legalStateDate and the event's source id in the included decision's evidence", () => {
+		const result = evaluateCurrentLawCandidate(
+			inputWithTk(relatedAct({ entryIntoForceDate: "2020-05-01" }), { legalStateDate: "2025-01-01" }),
+			EFFECTIVE_AS_OF,
+		);
+		expect(result.evidence.tkChecks).toEqual([
+			{
+				relatedSourceId: "DU/2020/1",
+				entryIntoForceDate: "2020-05-01",
+				resolvingTjLegalStateDate: "2025-01-01",
+				resolved: true,
+			},
+		]);
 	});
 
 	it("selects the announcement applicable AT a past effectiveAsOf, not the newest known today", () => {

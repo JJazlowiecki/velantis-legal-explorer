@@ -265,13 +265,57 @@ export function evaluateCurrentLawCandidate(
 		});
 	}
 
-	const tkHit = baseActiveRelations.find((r) => r.relationType === "constitutional_tribunal");
-	if (tkHit) {
-		return outcome(legalAct.id, "excluded", "unresolved_constitutional_tribunal_effect", null, {
-			effectiveAsOf,
-			selectedVersionId: selectedVersion.id,
-			amendmentChecks,
-			checks: { relatedSourceId: tkHit.relatedSourceId },
+	// Step 8: a Constitutional Tribunal (TK) relation on the base act is a historical LEGAL EVENT,
+	// not automatically a currentness blocker forever — it stops blocking once the OFFICIALLY
+	// PUBLISHED tekst jednolity itself already covers that event's legal effect. This is proven
+	// generically, never by interpreting a ruling's substance (which this system deliberately
+	// never attempts): a TJ's `legalStateDate` is the government compiler's own official
+	// certification (per art. 16 ustawy o ogłaszaniu aktów normatywnych) that the text reflects
+	// the state of law — INCLUDING every Tribunal effect and legislative change — as of that
+	// exact date. So a TK event is "absorbed" iff its own `entryIntoForceDate` (the date ITS
+	// legal effect actually began — correctly handles a ruling with a deferred/postponed effect,
+	// unlike its publication date) is on or before the selected TJ's `legalStateDate`. Every
+	// relation is evaluated (not just the first found) and every branch fails closed: a missing
+	// relatedLegalActId, missing entryIntoForceDate, or missing legalStateDate is treated as
+	// unresolved, never assumed favorable. No ruling ID or act ID is ever referenced by name here.
+	const tkRelations = baseActiveRelations.filter((r) => r.relationType === "constitutional_tribunal");
+	const tkChecks: Array<Record<string, unknown>> = [];
+	for (const rel of tkRelations) {
+		const info = rel.relatedLegalActId ? relatedActsById.get(rel.relatedLegalActId) : undefined;
+		if (!rel.relatedLegalActId || !info || info.entryIntoForceDate === null || selectedVersion.legalStateDate === null) {
+			tkChecks.push({ relatedSourceId: rel.relatedSourceId, resolved: false });
+			return outcome(legalAct.id, "excluded", "unresolved_constitutional_tribunal_effect", null, {
+				effectiveAsOf,
+				selectedVersionId: selectedVersion.id,
+				amendmentChecks,
+				tkChecks,
+				checks: { relatedSourceId: rel.relatedSourceId },
+			});
+		}
+		const resolvedByLaterTj = info.entryIntoForceDate <= selectedVersion.legalStateDate;
+		if (!resolvedByLaterTj) {
+			tkChecks.push({
+				relatedSourceId: rel.relatedSourceId,
+				entryIntoForceDate: info.entryIntoForceDate,
+				resolved: false,
+			});
+			return outcome(legalAct.id, "excluded", "unresolved_constitutional_tribunal_effect", null, {
+				effectiveAsOf,
+				selectedVersionId: selectedVersion.id,
+				amendmentChecks,
+				tkChecks,
+				checks: {
+					relatedSourceId: rel.relatedSourceId,
+					entryIntoForceDate: info.entryIntoForceDate,
+					tjLegalStateDate: selectedVersion.legalStateDate,
+				},
+			});
+		}
+		tkChecks.push({
+			relatedSourceId: rel.relatedSourceId,
+			entryIntoForceDate: info.entryIntoForceDate,
+			resolvingTjLegalStateDate: selectedVersion.legalStateDate,
+			resolved: true,
 		});
 	}
 
@@ -285,6 +329,7 @@ export function evaluateCurrentLawCandidate(
 		// than one parser output ever existed for the same official text.
 		contentRevisionCandidateCount: validMatches.length,
 		amendmentChecks,
+		tkChecks,
 		amendmentRelationsSource: "announcement",
 		correctionTkRelationsSource: "base_act_and_announcement",
 	});
