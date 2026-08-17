@@ -141,14 +141,37 @@ async function main() {
 					}
 				}
 
-				// Re-sync the base act's OWN relations now that every announcement/amendment act
+				// Sync metadata for the base act's own Constitutional Tribunal relation targets too —
+				// select.ts needs each ruling's entryIntoForceDate to decide whether it is already
+				// absorbed by the selected TJ's legalStateDate.
+				const tkRelations = await db
+					.select({ relatedSourceId: legalActRelations.relatedSourceId })
+					.from(legalActRelations)
+					.where(
+						and(
+							eq(legalActRelations.legalActId, baseAct.id),
+							eq(legalActRelations.isActive, true),
+							eq(legalActRelations.relationType, "constitutional_tribunal"),
+						),
+					);
+				for (const tk of tkRelations) {
+					try {
+						const tkCoords = parseSourceId(tk.relatedSourceId);
+						await ingestEliActMetadata(tkCoords, { db });
+						console.log(`  TK ruling ${tk.relatedSourceId}: metadata synced`);
+					} catch (error) {
+						console.log(`  TK ruling ${tk.relatedSourceId}: metadata FAILED — ${error instanceof Error ? error.message : "unknown error"}`);
+					}
+				}
+
+				// Re-sync the base act's OWN relations now that every announcement/amendment/TK act
 				// referenced above has been ingested — relation resolution (relatedLegalActId) only
 				// happens against whatever legal_acts rows exist AT SYNC TIME (see relations.ts), and
 				// the first sync above ran before those related acts existed. Without this second
 				// pass, every chain relation would be stuck with relatedLegalActId=null forever,
 				// which select.ts correctly (but needlessly) treats as metadata_incomplete.
 				await ingestEliActMetadata(coords, { fetchReferences: fetchEliActReferences, db });
-				console.log(`base relations re-synced (resolving announcement/amendment ids)`);
+				console.log(`base relations re-synced (resolving announcement/amendment/TK ids)`);
 
 				actOutcomes.push(`${scopeEntry.sourceId}: prepared (${announcementChain.length} announcements known)`);
 			} catch (error) {

@@ -156,7 +156,11 @@ async function loadCandidateInput(
 		.filter((r) => r.relationType === "post_consolidated_amendment" && r.relatedLegalActId)
 		.map((r) => r.relatedLegalActId as string);
 
-	const relatedActIds = [...new Set([...announcementIds, ...amendmentIds])];
+	const tkIds = baseRelations
+		.filter((r) => r.relationType === "constitutional_tribunal" && r.relatedLegalActId)
+		.map((r) => r.relatedLegalActId as string);
+
+	const relatedActIds = [...new Set([...announcementIds, ...amendmentIds, ...tkIds])];
 	const relatedActsById = new Map<
 		string,
 		{ sourceId: string; promulgationDate: string | null; expirationDate: string | null; entryIntoForceDate: string | null }
