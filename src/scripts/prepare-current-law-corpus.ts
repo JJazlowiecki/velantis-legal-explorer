@@ -6,10 +6,11 @@ import postgres from "postgres";
 import * as schema from "../db/schema";
 import { legalActRelations, legalActs } from "../db/schema";
 import { CURRENT_LAW_BOOTSTRAP_SCOPE } from "../lib/legal/current-law/bootstrap-scope";
-import { fetchEliActReferences } from "../lib/legal/eli/client";
+import { fetchEliActMetadata, fetchEliActReferences } from "../lib/legal/eli/client";
 import { ConsolidatedIngestError, ingestOfficialConsolidatedStructure } from "../lib/legal/eli/consolidated-ingest";
 import { ingestEliActMetadata } from "../lib/legal/eli/ingest";
 import { ELI_SOURCE } from "../lib/legal/eli/schema";
+import { ingestOfficialConsolidatedPdf, PdfConsolidatedIngestError } from "../lib/legal/pdf/pdf-ingest";
 import { indexLegalSearchDocuments } from "../lib/legal/search/indexing";
 import { parseServerEnv } from "../lib/env/schema";
 
@@ -84,15 +85,41 @@ async function main() {
 				for (const chainEntry of announcementChain) {
 					const announcementSourceId = chainEntry.relatedSourceId;
 					try {
-						const result = await ingestOfficialConsolidatedStructure({
-							db,
-							baseActSourceId: scopeEntry.sourceId,
-							announcementActSourceId: announcementSourceId,
-						});
-						console.log(
-							`  ${announcementSourceId}: structure OK (version=${result.legalActVersionId}, ${result.insertedCount} provisions)`,
-						);
-						versionsToIndex.add(result.legalActVersionId);
+						// Generic resource-capability rule (Phase 9 — never act-ID-special-cased): the
+						// announcement's own ELI metadata says which representation is actually
+						// available for THIS exact announcement. Most acts still publish text.html and
+						// take that (unchanged, historically-proven) path; an announcement with
+						// textHTML=false falls back to the official PDF "T" attachment instead — same
+						// provenance verification, same immutable-revision identity either way.
+						const announcementCoords = (() => {
+							const [publisher, yearStr, positionStr] = announcementSourceId.split("/");
+							return { publisher, year: Number(yearStr), position: Number(positionStr) };
+						})();
+						const announcementMetadata = await fetchEliActMetadata(announcementCoords);
+
+						if (announcementMetadata.textHTML) {
+							const result = await ingestOfficialConsolidatedStructure({
+								db,
+								baseActSourceId: scopeEntry.sourceId,
+								announcementActSourceId: announcementSourceId,
+							});
+							console.log(
+								`  ${announcementSourceId}: structure OK via HTML (version=${result.legalActVersionId}, ${result.insertedCount} provisions)`,
+							);
+							versionsToIndex.add(result.legalActVersionId);
+						} else if (announcementMetadata.textPDF) {
+							const result = await ingestOfficialConsolidatedPdf({
+								db,
+								baseActSourceId: scopeEntry.sourceId,
+								announcementActSourceId: announcementSourceId,
+							});
+							console.log(
+								`  ${announcementSourceId}: structure OK via PDF (version=${result.legalActVersionId}, ${result.insertedCount} provisions, source=${result.sourcePdfUrl})`,
+							);
+							versionsToIndex.add(result.legalActVersionId);
+						} else {
+							console.log(`  ${announcementSourceId}: no HTML or PDF text available from official source — skipping`);
+						}
 					} catch (error) {
 						console.log(
 							`  ${announcementSourceId}: structure ingest FAILED — ${error instanceof Error ? error.message : "unknown error"}`,
@@ -201,7 +228,7 @@ async function main() {
 }
 
 main().catch((error: unknown) => {
-	if (error instanceof ConsolidatedIngestError) {
+	if (error instanceof ConsolidatedIngestError || error instanceof PdfConsolidatedIngestError) {
 		console.error(`Preparation failed: ${error.message}`);
 	} else if (error instanceof Error) {
 		console.error(`Preparation failed: ${error.name}: ${error.message}`);
