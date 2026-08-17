@@ -22,18 +22,18 @@ export class SavedServiceError extends Error {
 type Db = PostgresJsDatabase<typeof schema>;
 
 /**
- * Serializes ALL Saved mutations (folders and items) for one visitor behind a single
+ * Serializes ALL Saved mutations (folders and items) for one owner behind a single
  * transaction-scoped Postgres advisory lock. This is the concurrency-safety mechanism for
- * both quota enforcement (item 16 of the milestone spec) and duplicate-name/duplicate-save
- * races: a naive "SELECT COUNT then INSERT if under limit" can exceed quota under two
- * near-simultaneous requests, but since every mutating call takes this lock first, two
- * concurrent requests for the same visitor are fully serialized — the second always sees the
- * first's effects before making its own decision. No Redis/distributed lock needed; plain
- * PostgreSQL `pg_advisory_xact_lock` (released automatically at transaction end) is enough.
- * Different visitors never contend with each other (hashtext of the visitor id + namespace).
+ * both quota enforcement and duplicate-name/duplicate-save races: a naive "SELECT COUNT then
+ * INSERT if under limit" can exceed quota under two near-simultaneous requests, but since
+ * every mutating call takes this lock first, two concurrent requests for the same owner are
+ * fully serialized — the second always sees the first's effects before making its own
+ * decision. No Redis/distributed lock needed; plain PostgreSQL `pg_advisory_xact_lock`
+ * (released automatically at transaction end) is enough. Different owners never contend with
+ * each other (hashtext of the user id + namespace).
  */
-async function lockVisitorForSavedMutation(tx: Db, visitorId: string): Promise<void> {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${visitorId} || ':explorer-saved'))`);
+async function lockUserForSavedMutation(tx: Db, userId: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userId} || ':explorer-saved'))`);
 }
 
 export interface SavedFolderRecord {
@@ -94,18 +94,18 @@ function validateFolderName(raw: string): { ok: true; name: string } | { ok: fal
 
 export interface ListSavedFoldersInput {
   db: Db;
-  visitorId: string;
+  userId: string;
 }
 
 export async function listSavedFolders(input: ListSavedFoldersInput): Promise<SavedFolderRecord[]> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return [];
   }
 
   const rows = await input.db
     .select()
     .from(explorerSavedFolders)
-    .where(eq(explorerSavedFolders.visitorId, input.visitorId))
+    .where(eq(explorerSavedFolders.userId, input.userId))
     .orderBy(asc(explorerSavedFolders.name));
 
   return rows.map((row) => ({ id: row.id, name: row.name, createdAt: row.createdAt, updatedAt: row.updatedAt }));
@@ -113,6 +113,8 @@ export async function listSavedFolders(input: ListSavedFoldersInput): Promise<Sa
 
 export interface CreateSavedFolderInput {
   db: Db;
+  userId: string;
+  /** Still required by the NOT NULL `visitor_id` column — not used for authorization. */
   visitorId: string;
   name: string;
 }
@@ -124,8 +126,8 @@ export type CreateSavedFolderResult =
   | { status: "limit_exceeded"; limit: number };
 
 export async function createSavedFolder(input: CreateSavedFolderInput): Promise<CreateSavedFolderResult> {
-  if (!input.visitorId) {
-    throw new SavedServiceError("createSavedFolder requires a visitorId");
+  if (!input.userId) {
+    throw new SavedServiceError("createSavedFolder requires a userId");
   }
 
   const validated = validateFolderName(input.name);
@@ -134,12 +136,12 @@ export async function createSavedFolder(input: CreateSavedFolderInput): Promise<
   }
 
   return input.db.transaction(async (tx) => {
-    await lockVisitorForSavedMutation(tx, input.visitorId);
+    await lockUserForSavedMutation(tx, input.userId);
 
     const [{ count }] = await tx
       .select({ count: sql<number>`count(*)::int` })
       .from(explorerSavedFolders)
-      .where(eq(explorerSavedFolders.visitorId, input.visitorId));
+      .where(eq(explorerSavedFolders.userId, input.userId));
     if (count >= MAX_FOLDERS_PER_VISITOR) {
       return { status: "limit_exceeded" as const, limit: MAX_FOLDERS_PER_VISITOR };
     }
@@ -149,7 +151,7 @@ export async function createSavedFolder(input: CreateSavedFolderInput): Promise<
       .from(explorerSavedFolders)
       .where(
         and(
-          eq(explorerSavedFolders.visitorId, input.visitorId),
+          eq(explorerSavedFolders.userId, input.userId),
           sql`lower(${explorerSavedFolders.name}) = lower(${validated.name})`,
         ),
       )
@@ -160,7 +162,7 @@ export async function createSavedFolder(input: CreateSavedFolderInput): Promise<
 
     const [row] = await tx
       .insert(explorerSavedFolders)
-      .values({ visitorId: input.visitorId, name: validated.name })
+      .values({ visitorId: input.visitorId, userId: input.userId, name: validated.name })
       .returning({ id: explorerSavedFolders.id });
 
     return { status: "created" as const, id: row.id };
@@ -169,7 +171,7 @@ export async function createSavedFolder(input: CreateSavedFolderInput): Promise<
 
 export interface RenameSavedFolderInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   id: string;
   name: string;
 }
@@ -181,8 +183,8 @@ export type RenameSavedFolderResult =
   | { status: "duplicate_name" };
 
 export async function renameSavedFolder(input: RenameSavedFolderInput): Promise<RenameSavedFolderResult> {
-  if (!input.visitorId) {
-    throw new SavedServiceError("renameSavedFolder requires a visitorId");
+  if (!input.userId) {
+    throw new SavedServiceError("renameSavedFolder requires a userId");
   }
 
   const validated = validateFolderName(input.name);
@@ -191,12 +193,12 @@ export async function renameSavedFolder(input: RenameSavedFolderInput): Promise<
   }
 
   return input.db.transaction(async (tx) => {
-    await lockVisitorForSavedMutation(tx, input.visitorId);
+    await lockUserForSavedMutation(tx, input.userId);
 
     const [existing] = await tx
       .select({ id: explorerSavedFolders.id })
       .from(explorerSavedFolders)
-      .where(and(eq(explorerSavedFolders.id, input.id), eq(explorerSavedFolders.visitorId, input.visitorId)))
+      .where(and(eq(explorerSavedFolders.id, input.id), eq(explorerSavedFolders.userId, input.userId)))
       .limit(1);
     if (!existing) {
       return { status: "not_found" as const };
@@ -207,7 +209,7 @@ export async function renameSavedFolder(input: RenameSavedFolderInput): Promise<
       .from(explorerSavedFolders)
       .where(
         and(
-          eq(explorerSavedFolders.visitorId, input.visitorId),
+          eq(explorerSavedFolders.userId, input.userId),
           sql`lower(${explorerSavedFolders.name}) = lower(${validated.name})`,
           ne(explorerSavedFolders.id, input.id),
         ),
@@ -220,7 +222,7 @@ export async function renameSavedFolder(input: RenameSavedFolderInput): Promise<
     await tx
       .update(explorerSavedFolders)
       .set({ name: validated.name, updatedAt: new Date() })
-      .where(and(eq(explorerSavedFolders.id, input.id), eq(explorerSavedFolders.visitorId, input.visitorId)));
+      .where(and(eq(explorerSavedFolders.id, input.id), eq(explorerSavedFolders.userId, input.userId)));
 
     return { status: "renamed" as const };
   });
@@ -228,27 +230,29 @@ export async function renameSavedFolder(input: RenameSavedFolderInput): Promise<
 
 export interface DeleteSavedFolderInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   id: string;
 }
 
 /**
  * Deleting a folder never deletes its items — the FK's `onDelete: "set null"` unfiles them
  * automatically (folder_id becomes null, i.e. "Bez folderu") as part of this same statement.
- * Visitor-scoped; a nonexistent or foreign folder id is a safe no-op.
+ * Owner-scoped; a nonexistent or foreign folder id is a safe no-op.
  */
 export async function deleteSavedFolder(input: DeleteSavedFolderInput): Promise<void> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return;
   }
 
   await input.db
     .delete(explorerSavedFolders)
-    .where(and(eq(explorerSavedFolders.id, input.id), eq(explorerSavedFolders.visitorId, input.visitorId)));
+    .where(and(eq(explorerSavedFolders.id, input.id), eq(explorerSavedFolders.userId, input.userId)));
 }
 
 export interface CreateSavedItemInput {
   db: Db;
+  userId: string;
+  /** Still required by the NOT NULL `visitor_id` column — not used for authorization. */
   visitorId: string;
   kind: SavedItemKind;
   title: string;
@@ -269,24 +273,24 @@ export type CreateSavedItemResult =
 /**
  * Folders never count toward the item quota (only explorer_saved_items rows are counted).
  * Duplicate-save detection and quota enforcement both happen inside the same
- * visitor-locked transaction — see lockVisitorForSavedMutation.
+ * owner-locked transaction — see lockUserForSavedMutation.
  */
 export async function createSavedItem(input: CreateSavedItemInput): Promise<CreateSavedItemResult> {
-  if (!input.visitorId) {
-    throw new SavedServiceError("createSavedItem requires a visitorId");
+  if (!input.userId) {
+    throw new SavedServiceError("createSavedItem requires a userId");
   }
 
   // Validate BEFORE persisting — never write a snapshot that wouldn't survive being read back.
   parseSavedSnapshot(input.kind, input.snapshot);
 
   return input.db.transaction(async (tx) => {
-    await lockVisitorForSavedMutation(tx, input.visitorId);
+    await lockUserForSavedMutation(tx, input.userId);
 
     if (input.folderId) {
       const [folder] = await tx
         .select({ id: explorerSavedFolders.id })
         .from(explorerSavedFolders)
-        .where(and(eq(explorerSavedFolders.id, input.folderId), eq(explorerSavedFolders.visitorId, input.visitorId)))
+        .where(and(eq(explorerSavedFolders.id, input.folderId), eq(explorerSavedFolders.userId, input.userId)))
         .limit(1);
       if (!folder) {
         return { status: "folder_not_found" as const };
@@ -298,7 +302,7 @@ export async function createSavedItem(input: CreateSavedItemInput): Promise<Crea
       .from(explorerSavedItems)
       .where(
         and(
-          eq(explorerSavedItems.visitorId, input.visitorId),
+          eq(explorerSavedItems.userId, input.userId),
           eq(explorerSavedItems.kind, input.kind),
           eq(explorerSavedItems.contentKey, input.contentKey),
         ),
@@ -311,7 +315,7 @@ export async function createSavedItem(input: CreateSavedItemInput): Promise<Crea
     const [{ count }] = await tx
       .select({ count: sql<number>`count(*)::int` })
       .from(explorerSavedItems)
-      .where(eq(explorerSavedItems.visitorId, input.visitorId));
+      .where(eq(explorerSavedItems.userId, input.userId));
     if (count >= input.maxItems) {
       return { status: "quota_exceeded" as const, limit: input.maxItems };
     }
@@ -320,6 +324,7 @@ export async function createSavedItem(input: CreateSavedItemInput): Promise<Crea
       .insert(explorerSavedItems)
       .values({
         visitorId: input.visitorId,
+        userId: input.userId,
         folderId: input.folderId ?? null,
         kind: input.kind,
         title: input.title,
@@ -337,13 +342,13 @@ const DEFAULT_SAVED_LIST_LIMIT = 200;
 
 export interface ListSavedItemsInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   limit?: number;
 }
 
 /** Newest first, bounded (default/hard cap 200) — no unbounded load, no elaborate pagination. */
 export async function listSavedItems(input: ListSavedItemsInput): Promise<SavedItemRecord[]> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return [];
   }
 
@@ -352,7 +357,7 @@ export async function listSavedItems(input: ListSavedItemsInput): Promise<SavedI
   const rows = await input.db
     .select()
     .from(explorerSavedItems)
-    .where(eq(explorerSavedItems.visitorId, input.visitorId))
+    .where(eq(explorerSavedItems.userId, input.userId))
     .orderBy(desc(explorerSavedItems.createdAt))
     .limit(limit);
 
@@ -361,19 +366,19 @@ export async function listSavedItems(input: ListSavedItemsInput): Promise<SavedI
 
 export interface GetSavedItemInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   id: string;
 }
 
 export async function getSavedItem(input: GetSavedItemInput): Promise<SavedItemRecord | null> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return null;
   }
 
   const [row] = await input.db
     .select()
     .from(explorerSavedItems)
-    .where(and(eq(explorerSavedItems.id, input.id), eq(explorerSavedItems.visitorId, input.visitorId)))
+    .where(and(eq(explorerSavedItems.id, input.id), eq(explorerSavedItems.userId, input.userId)))
     .limit(1);
 
   return row ? parseSavedItemRow(row) : null;
@@ -381,28 +386,28 @@ export async function getSavedItem(input: GetSavedItemInput): Promise<SavedItemR
 
 export interface DeleteSavedItemInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   id: string;
 }
 
 /**
  * Deletes only the Saved row itself — never touches History, source provisions, legal act
  * data, or search documents (those live in entirely separate tables this function never
- * references). Visitor-scoped; a nonexistent or foreign id is a safe no-op.
+ * references). Owner-scoped; a nonexistent or foreign id is a safe no-op.
  */
 export async function deleteSavedItem(input: DeleteSavedItemInput): Promise<void> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return;
   }
 
   await input.db
     .delete(explorerSavedItems)
-    .where(and(eq(explorerSavedItems.id, input.id), eq(explorerSavedItems.visitorId, input.visitorId)));
+    .where(and(eq(explorerSavedItems.id, input.id), eq(explorerSavedItems.userId, input.userId)));
 }
 
 export interface MoveSavedItemInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   id: string;
   folderId: string | null;
 }
@@ -411,21 +416,21 @@ export type MoveSavedItemResult = { status: "moved" } | { status: "item_not_foun
 
 /**
  * Moves a saved item into a folder (or to "Bez folderu" when folderId is null). Both the item
- * AND the target folder are ownership-checked against visitorId — a visitor can never move
- * their own item into another visitor's folder merely because that folder's UUID is valid.
+ * AND the target folder are ownership-checked against userId — a user can never move their
+ * own item into another user's folder merely because that folder's UUID is valid.
  */
 export async function moveSavedItem(input: MoveSavedItemInput): Promise<MoveSavedItemResult> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return { status: "item_not_found" };
   }
 
   return input.db.transaction(async (tx) => {
-    await lockVisitorForSavedMutation(tx, input.visitorId);
+    await lockUserForSavedMutation(tx, input.userId);
 
     const [item] = await tx
       .select({ id: explorerSavedItems.id })
       .from(explorerSavedItems)
-      .where(and(eq(explorerSavedItems.id, input.id), eq(explorerSavedItems.visitorId, input.visitorId)))
+      .where(and(eq(explorerSavedItems.id, input.id), eq(explorerSavedItems.userId, input.userId)))
       .limit(1);
     if (!item) {
       return { status: "item_not_found" as const };
@@ -435,7 +440,7 @@ export async function moveSavedItem(input: MoveSavedItemInput): Promise<MoveSave
       const [folder] = await tx
         .select({ id: explorerSavedFolders.id })
         .from(explorerSavedFolders)
-        .where(and(eq(explorerSavedFolders.id, input.folderId), eq(explorerSavedFolders.visitorId, input.visitorId)))
+        .where(and(eq(explorerSavedFolders.id, input.folderId), eq(explorerSavedFolders.userId, input.userId)))
         .limit(1);
       if (!folder) {
         return { status: "folder_not_found" as const };
@@ -445,7 +450,7 @@ export async function moveSavedItem(input: MoveSavedItemInput): Promise<MoveSave
     await tx
       .update(explorerSavedItems)
       .set({ folderId: input.folderId, updatedAt: new Date() })
-      .where(and(eq(explorerSavedItems.id, input.id), eq(explorerSavedItems.visitorId, input.visitorId)));
+      .where(and(eq(explorerSavedItems.id, input.id), eq(explorerSavedItems.userId, input.userId)));
 
     return { status: "moved" as const };
   });
@@ -458,19 +463,19 @@ export interface SavedUsage {
 
 export interface GetSavedUsageInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   maxItems: number;
 }
 
 export async function getSavedUsage(input: GetSavedUsageInput): Promise<SavedUsage> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return { count: 0, max: input.maxItems };
   }
 
   const [{ count }] = await input.db
     .select({ count: sql<number>`count(*)::int` })
     .from(explorerSavedItems)
-    .where(eq(explorerSavedItems.visitorId, input.visitorId));
+    .where(eq(explorerSavedItems.userId, input.userId));
 
   return { count, max: input.maxItems };
 }

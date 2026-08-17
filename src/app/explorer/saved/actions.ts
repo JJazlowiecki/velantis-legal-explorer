@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 
 import { getDb } from "@/db";
 import { getServerEnv } from "@/lib/env/server";
+import { getCurrentUser } from "@/lib/auth/session";
 import { buildContentKey, normalizeQueryForContentKey } from "@/lib/explorer/saved/content-key";
 import { toSavedListItem, type SavedListItem } from "@/lib/explorer/saved/list-view";
 import {
@@ -28,7 +29,7 @@ import type {
 } from "@/lib/explorer/saved/snapshot";
 import { explorerHistoryCitedSourceSchema, explorerHistorySnapshotSchema } from "@/lib/explorer/history/snapshot";
 import { getHistoryEntry } from "@/lib/explorer/history/service";
-import { getOrCreateVisitorId, getVisitorId } from "@/lib/explorer/history/visitor";
+import { getOrCreateVisitorId } from "@/lib/explorer/history/visitor";
 import type { ExplorerAnswerView, ExplorerCitedSource } from "@/lib/explorer/view-model";
 
 const ANSWER_TITLE_MAX_LENGTH = 120;
@@ -67,12 +68,12 @@ function safeLog(context: string, error: unknown): void {
  * deleted later (by the user or by future retention).
  */
 export async function saveAnswerFromHistory(historyEntryId: string, folderId: string | null = null): Promise<SaveOutcome> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return { status: "not_found" };
   }
 
-  const entry = await getHistoryEntry({ db: getDb(), visitorId, id: historyEntryId });
+  const entry = await getHistoryEntry({ db: getDb(), userId: user.id, id: historyEntryId });
   if (!entry) {
     return { status: "not_found" };
   }
@@ -88,7 +89,7 @@ export async function saveAnswerFromHistory(historyEntryId: string, folderId: st
     clarificationQuestion: entry.snapshot.clarificationQuestion,
   };
 
-  return persistAnswer(visitorId, entry.query, snapshot, buildContentKey("answer", historyEntryId), folderId);
+  return persistAnswer(user.id, entry.query, snapshot, buildContentKey("answer", historyEntryId), folderId);
 }
 
 /**
@@ -104,7 +105,10 @@ export async function saveAnswerFromPayload(
   view: ExplorerAnswerView,
   folderId: string | null = null,
 ): Promise<SaveOutcome> {
-  const visitorId = await getOrCreateVisitorId();
+  const user = await getCurrentUser();
+  if (!user) {
+    return { status: "not_found" };
+  }
 
   const validated = explorerHistorySnapshotSchema.safeParse(view);
   if (!validated.success) {
@@ -120,19 +124,21 @@ export async function saveAnswerFromPayload(
   const snapshot: SavedAnswerSnapshot = { query: normalizedQuery, ...validated.data };
   const contentKey = buildContentKey("answer", `${normalizeQueryForContentKey(normalizedQuery)}|${validated.data.answer}`);
 
-  return persistAnswer(visitorId, normalizedQuery, snapshot, contentKey, folderId);
+  return persistAnswer(user.id, normalizedQuery, snapshot, contentKey, folderId);
 }
 
 async function persistAnswer(
-  visitorId: string,
+  userId: string,
   query: string,
   snapshot: SavedAnswerSnapshot,
   contentKey: string,
   folderId: string | null,
 ): Promise<SaveOutcome> {
   try {
+    const visitorId = await getOrCreateVisitorId();
     const result = await createSavedItem({
       db: getDb(),
+      userId,
       visitorId,
       kind: "answer",
       title: buildAnswerTitle(query),
@@ -152,38 +158,43 @@ async function persistAnswer(
 
 /** Save a query/search — sourced from a History entry's own (already-validated) query. */
 export async function saveSearchFromHistory(historyEntryId: string, folderId: string | null = null): Promise<SaveOutcome> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return { status: "not_found" };
   }
 
-  const entry = await getHistoryEntry({ db: getDb(), visitorId, id: historyEntryId });
+  const entry = await getHistoryEntry({ db: getDb(), userId: user.id, id: historyEntryId });
   if (!entry) {
     return { status: "not_found" };
   }
 
-  return persistSearch(visitorId, entry.query, folderId);
+  return persistSearch(user.id, entry.query, folderId);
 }
 
 /** Fallback: save a query typed/submitted directly (e.g. from the live search box), no history entry required. */
 export async function saveSearchFromQuery(query: string, folderId: string | null = null): Promise<SaveOutcome> {
-  const visitorId = await getOrCreateVisitorId();
+  const user = await getCurrentUser();
+  if (!user) {
+    return { status: "not_found" };
+  }
   const normalizedQuery = query.trim();
   if (!normalizedQuery) {
     return { status: "error" };
   }
-  return persistSearch(visitorId, normalizedQuery, folderId);
+  return persistSearch(user.id, normalizedQuery, folderId);
 }
 
-async function persistSearch(visitorId: string, query: string, folderId: string | null): Promise<SaveOutcome> {
+async function persistSearch(userId: string, query: string, folderId: string | null): Promise<SaveOutcome> {
   const trimmed = query.trim();
   if (!trimmed) {
     return { status: "error" };
   }
 
   try {
+    const visitorId = await getOrCreateVisitorId();
     const result = await createSavedItem({
       db: getDb(),
+      userId,
       visitorId,
       kind: "search",
       title: buildAnswerTitle(trimmed),
@@ -211,12 +222,12 @@ export async function saveProvisionFromHistory(
   sourceIndex: number,
   folderId: string | null = null,
 ): Promise<SaveOutcome> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return { status: "not_found" };
   }
 
-  const entry = await getHistoryEntry({ db: getDb(), visitorId, id: historyEntryId });
+  const entry = await getHistoryEntry({ db: getDb(), userId: user.id, id: historyEntryId });
   if (!entry) {
     return { status: "not_found" };
   }
@@ -226,7 +237,7 @@ export async function saveProvisionFromHistory(
     return { status: "not_found" };
   }
 
-  return persistProvision(visitorId, source, folderId);
+  return persistProvision(user.id, source, folderId);
 }
 
 /** Fallback: save a provision straight from a live (not-yet-historied) result — Zod-validated, never trusted blindly. */
@@ -234,7 +245,10 @@ export async function saveProvisionFromPayload(
   provision: ExplorerCitedSource,
   folderId: string | null = null,
 ): Promise<SaveOutcome> {
-  const visitorId = await getOrCreateVisitorId();
+  const user = await getCurrentUser();
+  if (!user) {
+    return { status: "not_found" };
+  }
 
   const validated = explorerHistoryCitedSourceSchema.safeParse(provision);
   if (!validated.success) {
@@ -242,17 +256,19 @@ export async function saveProvisionFromPayload(
     return { status: "error" };
   }
 
-  return persistProvision(visitorId, validated.data, folderId);
+  return persistProvision(user.id, validated.data, folderId);
 }
 
 async function persistProvision(
-  visitorId: string,
+  userId: string,
   provision: SavedProvisionSnapshot,
   folderId: string | null,
 ): Promise<SaveOutcome> {
   try {
+    const visitorId = await getOrCreateVisitorId();
     const result = await createSavedItem({
       db: getDb(),
+      userId,
       visitorId,
       kind: "provision",
       title: buildProvisionTitle(provision),
@@ -291,18 +307,18 @@ export interface SavedListPayload {
   usage: SavedUsage;
 }
 
-/** Visitor-scoped, bounded (see listSavedItems), always returns a consistent triple for the page. */
+/** Owner-scoped, bounded (see listSavedItems), always returns a consistent triple for the page. */
 export async function listSaved(): Promise<SavedListPayload> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return { items: [], folders: [], usage: { count: 0, max: getSavedMaxItems() } };
   }
 
   const db = getDb();
   const [records, folders, usage] = await Promise.all([
-    listSavedItems({ db, visitorId }),
-    listSavedFolders({ db, visitorId }),
-    getSavedUsage({ db, visitorId, maxItems: getSavedMaxItems() }),
+    listSavedItems({ db, userId: user.id }),
+    listSavedFolders({ db, userId: user.id }),
+    getSavedUsage({ db, userId: user.id, maxItems: getSavedMaxItems() }),
   ]);
 
   return { items: records.map(toSavedListItem), folders, usage };
@@ -318,14 +334,14 @@ export interface SavedItemDetail {
   snapshot: SavedSnapshot;
 }
 
-/** Visitor-scoped detail lookup for the preview modal — never re-runs anything, just reads the stored snapshot. */
+/** Owner-scoped detail lookup for the preview modal — never re-runs anything, just reads the stored snapshot. */
 export async function getSavedItemDetail(id: string): Promise<SavedItemDetail | null> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return null;
   }
 
-  const record = await getSavedItem({ db: getDb(), visitorId, id });
+  const record = await getSavedItem({ db: getDb(), userId: user.id, id });
   if (!record) {
     return null;
   }
@@ -350,10 +366,14 @@ export type FolderOutcome =
   | { status: "error" };
 
 export async function createSavedFolderAction(name: string): Promise<FolderOutcome> {
-  const visitorId = await getOrCreateVisitorId();
+  const user = await getCurrentUser();
+  if (!user) {
+    return { status: "not_found" };
+  }
 
   try {
-    const result = await createSavedFolder({ db: getDb(), visitorId, name });
+    const visitorId = await getOrCreateVisitorId();
+    const result = await createSavedFolder({ db: getDb(), userId: user.id, visitorId, name });
     revalidatePath("/explorer/saved");
 
     if (result.status === "created") return { status: "created", id: result.id };
@@ -367,13 +387,13 @@ export async function createSavedFolderAction(name: string): Promise<FolderOutco
 }
 
 export async function renameSavedFolderAction(id: string, name: string): Promise<FolderOutcome> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return { status: "not_found" };
   }
 
   try {
-    const result = await renameSavedFolder({ db: getDb(), visitorId, id, name });
+    const result = await renameSavedFolder({ db: getDb(), userId: user.id, id, name });
     revalidatePath("/explorer/saved");
 
     if (result.status === "renamed") return { status: "renamed" };
@@ -387,13 +407,13 @@ export async function renameSavedFolderAction(id: string, name: string): Promise
 }
 
 export async function deleteSavedFolderAction(id: string): Promise<{ ok: boolean }> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return { ok: true };
   }
 
   try {
-    await deleteSavedFolder({ db: getDb(), visitorId, id });
+    await deleteSavedFolder({ db: getDb(), userId: user.id, id });
     revalidatePath("/explorer/saved");
     return { ok: true };
   } catch (error) {
@@ -403,13 +423,13 @@ export async function deleteSavedFolderAction(id: string): Promise<{ ok: boolean
 }
 
 export async function moveSavedItemAction(id: string, folderId: string | null): Promise<{ ok: boolean }> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return { ok: true };
   }
 
   try {
-    const result = await moveSavedItem({ db: getDb(), visitorId, id, folderId });
+    const result = await moveSavedItem({ db: getDb(), userId: user.id, id, folderId });
     revalidatePath("/explorer/saved");
     return { ok: result.status === "moved" };
   } catch (error) {
@@ -419,13 +439,13 @@ export async function moveSavedItemAction(id: string, folderId: string | null): 
 }
 
 export async function deleteSavedItemAction(id: string): Promise<{ ok: boolean }> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return { ok: true };
   }
 
   try {
-    await deleteSavedItem({ db: getDb(), visitorId, id });
+    await deleteSavedItem({ db: getDb(), userId: user.id, id });
     revalidatePath("/explorer/saved");
     return { ok: true };
   } catch (error) {

@@ -5,15 +5,15 @@ import { ArrowLeft } from "lucide-react";
 import { AppShell } from "@/components/layout/app-shell";
 import { ExplorerResult } from "@/components/explorer/explorer-result";
 import { getDb } from "@/db";
+import { getCurrentUser } from "@/lib/auth/session";
 import { getHistoryEntry } from "@/lib/explorer/history/service";
-import { getVisitorId } from "@/lib/explorer/history/visitor";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Reopens a previously persisted /explorer answer from its stored snapshot — never re-runs
- * the legal pipeline (no new OpenAI call, no new retrieval). Visitor-scoped: a malformed id,
- * a nonexistent id, or an id owned by a different visitor all render the same 404, never
+ * the legal pipeline (no new OpenAI call, no new retrieval). Owner-scoped: a malformed id,
+ * a nonexistent id, or an id owned by a different user all render the same 404, never
  * leaking whether a given id exists for someone else.
  */
 export default async function ExplorerHistoryEntryPage({ params }: { params: Promise<{ id: string }> }) {
@@ -22,12 +22,12 @@ export default async function ExplorerHistoryEntryPage({ params }: { params: Pro
     notFound();
   }
 
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     notFound();
   }
 
-  const entry = await getHistoryEntry({ db: getDb(), visitorId, id });
+  const entry = await getHistoryEntry({ db: getDb(), userId: user.id, id });
   if (!entry) {
     notFound();
   }

@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
 	type AnyPgColumn,
+	bigint,
 	boolean,
 	date,
 	index,
@@ -279,6 +280,13 @@ export const explorerHistoryEntries = pgTable(
 	{
 		id: uuid("id").defaultRandom().primaryKey(),
 		visitorId: uuid("visitor_id").notNull(),
+		/**
+		 * Real ownership since Production & Monetization v1 — nullable/backfill-compatible: old
+		 * pre-auth rows keep `userId = null` and are NEVER returned to any authenticated user
+		 * (every read path filters by `userId`, never `visitorId`, once auth exists). `visitorId`
+		 * is kept, unused for authorization, purely to avoid a destructive migration.
+		 */
+		userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
 		query: text("query").notNull(),
 		status: text("status").notNull(),
 		resultSnapshot: jsonb("result_snapshot").notNull(),
@@ -299,6 +307,7 @@ export const explorerHistoryEntries = pgTable(
 	},
 	(table) => [
 		index("explorer_history_entries_visitor_id_created_at_idx").on(table.visitorId, table.createdAt),
+		index("explorer_history_entries_user_id_created_at_idx").on(table.userId, table.createdAt),
 	],
 );
 
@@ -314,11 +323,16 @@ export const explorerSavedFolders = pgTable(
 	{
 		id: uuid("id").defaultRandom().primaryKey(),
 		visitorId: uuid("visitor_id").notNull(),
+		/** Real ownership since Production & Monetization v1 — same nullable/backfill approach as explorerHistoryEntries.userId. */
+		userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
 		name: text("name").notNull(),
 		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 	},
-	(table) => [index("explorer_saved_folders_visitor_id_idx").on(table.visitorId)],
+	(table) => [
+		index("explorer_saved_folders_visitor_id_idx").on(table.visitorId),
+		index("explorer_saved_folders_user_id_idx").on(table.userId),
+	],
 );
 
 /**
@@ -336,6 +350,8 @@ export const explorerSavedItems = pgTable(
 	{
 		id: uuid("id").defaultRandom().primaryKey(),
 		visitorId: uuid("visitor_id").notNull(),
+		/** Real ownership since Production & Monetization v1 — same nullable/backfill approach as explorerHistoryEntries.userId. */
+		userId: text("user_id").references(() => user.id, { onDelete: "cascade" }),
 		folderId: uuid("folder_id").references(() => explorerSavedFolders.id, { onDelete: "set null" }),
 		kind: text("kind").notNull(),
 		title: text("title").notNull(),
@@ -348,6 +364,7 @@ export const explorerSavedItems = pgTable(
 	(table) => [
 		index("explorer_saved_items_visitor_id_created_at_idx").on(table.visitorId, table.createdAt),
 		index("explorer_saved_items_visitor_id_folder_id_idx").on(table.visitorId, table.folderId),
+		index("explorer_saved_items_user_id_created_at_idx").on(table.userId, table.createdAt),
 		uniqueIndex("explorer_saved_items_visitor_kind_content_key_uidx").on(
 			table.visitorId,
 			table.kind,
@@ -469,4 +486,141 @@ export const verifiedLegalAnswerCache = pgTable(
 		),
 		index("verified_legal_answer_cache_corpus_run_id_idx").on(table.corpusRunId),
 	],
+);
+
+// ============================================================================
+// Auth (Better Auth) — src/lib/auth/auth.ts. Table/column shapes follow Better Auth's own
+// core schema exactly (verified against its Drizzle adapter expectations); IDs are `text`
+// (Better Auth's own generator), NOT `uuid`, so every FK from app tables into `user.id` is
+// `text` too (see explorerHistoryEntries.userId etc. above). Never hand-edit rows in these
+// tables outside Better Auth's own API — password hashing, session tokens, and verification
+// tokens are entirely its responsibility.
+// ============================================================================
+
+export const user = pgTable("user", {
+	id: text("id").primaryKey(),
+	name: text("name").notNull(),
+	email: text("email").notNull().unique(),
+	emailVerified: boolean("email_verified").notNull().default(false),
+	image: text("image"),
+	/** Set by the Stripe plugin (createCustomerOnSignUp) — the user's Stripe Customer id, absent until first checkout/customer creation. */
+	stripeCustomerId: text("stripe_customer_id"),
+	createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+});
+
+export const session = pgTable(
+	"session",
+	{
+		id: text("id").primaryKey(),
+		expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+		token: text("token").notNull().unique(),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+		ipAddress: text("ip_address"),
+		userAgent: text("user_agent"),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+	},
+	(table) => [index("session_user_id_idx").on(table.userId)],
+);
+
+export const account = pgTable(
+	"account",
+	{
+		id: text("id").primaryKey(),
+		accountId: text("account_id").notNull(),
+		providerId: text("provider_id").notNull(),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		accessToken: text("access_token"),
+		refreshToken: text("refresh_token"),
+		idToken: text("id_token"),
+		accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+		refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
+		scope: text("scope"),
+		/** Hashed (never plaintext) — Better Auth's own scrypt-based hashing for the email/password provider. */
+		password: text("password"),
+		createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+	},
+	(table) => [index("account_user_id_idx").on(table.userId)],
+);
+
+export const verification = pgTable(
+	"verification",
+	{
+		id: text("id").primaryKey(),
+		identifier: text("identifier").notNull(),
+		value: text("value").notNull(),
+		expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+		createdAt: timestamp("created_at", { withTimezone: true }),
+		updatedAt: timestamp("updated_at", { withTimezone: true }),
+	},
+	(table) => [index("verification_identifier_idx").on(table.identifier)],
+);
+
+/** Better Auth's database-backed rate-limit storage (see rateLimit.storage="database" in auth.ts) — production-safe, no in-memory-only limiter. */
+export const rateLimit = pgTable("rate_limit", {
+	id: text("id").primaryKey(),
+	key: text("key"),
+	count: integer("count"),
+	lastRequest: bigint("last_request", { mode: "number" }),
+});
+
+/**
+ * @better-auth/stripe plugin's own subscription table (see src/lib/auth/auth.ts) — the SOLE
+ * authoritative source of paid entitlement (src/lib/billing/entitlement.ts reads this
+ * directly, never a second parallel representation). `referenceId` is the user id.
+ * `status`/`priceId` are the fields entitlement resolution actually trusts; everything else
+ * is plugin-managed bookkeeping.
+ */
+export const subscription = pgTable(
+	"subscription",
+	{
+		id: text("id").primaryKey(),
+		plan: text("plan").notNull(),
+		referenceId: text("reference_id").notNull(),
+		stripeCustomerId: text("stripe_customer_id"),
+		stripeSubscriptionId: text("stripe_subscription_id"),
+		status: text("status").notNull(),
+		periodStart: timestamp("period_start", { withTimezone: true }),
+		periodEnd: timestamp("period_end", { withTimezone: true }),
+		cancelAtPeriodEnd: boolean("cancel_at_period_end"),
+		seats: integer("seats"),
+		trialStart: timestamp("trial_start", { withTimezone: true }),
+		trialEnd: timestamp("trial_end", { withTimezone: true }),
+		priceId: text("price_id"),
+	},
+	(table) => [index("subscription_reference_id_idx").on(table.referenceId)],
+);
+
+// ============================================================================
+// Monthly usage quota (see src/lib/billing/quota.ts) — one row per (user, calendar month,
+// UTC). Race-safe reservation is a single atomic upsert (`INSERT ... ON CONFLICT DO UPDATE
+// ... WHERE used < :limit RETURNING`), never a read-then-write from application code, so
+// concurrent requests can never both observe "one slot left" and both consume it — see
+// quota.ts's doc comment for the exact statement and why it is safe under concurrency.
+// `limit` is NOT stored here — the caller always supplies the FRESH entitlement-derived
+// limit on every reservation attempt, so a mid-period plan upgrade takes effect immediately
+// rather than being frozen at the period's first request.
+// ============================================================================
+export const explorerUsagePeriods = pgTable(
+	"explorer_usage_periods",
+	{
+		id: uuid("id").defaultRandom().primaryKey(),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		/** First instant of the UTC calendar month this row accounts for (inclusive). */
+		periodStart: timestamp("period_start", { withTimezone: true }).notNull(),
+		/** First instant of the NEXT UTC calendar month (exclusive upper bound). */
+		periodEnd: timestamp("period_end", { withTimezone: true }).notNull(),
+		used: integer("used").notNull().default(0),
+		createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+		updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+	},
+	(table) => [uniqueIndex("explorer_usage_periods_user_id_period_start_uidx").on(table.userId, table.periodStart)],
 );

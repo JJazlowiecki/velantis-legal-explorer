@@ -82,6 +82,36 @@ export const serverEnvSchema = z.object({
     .int("EXPLORER_HISTORY_MAX_ENTRIES must be an integer")
     .positive("EXPLORER_HISTORY_MAX_ENTRIES must be a positive integer")
     .default(300),
+
+  // === Auth (Better Auth) ===
+  // Signing secret for sessions/tokens. Required in production; a fixed local-only fallback
+  // is used in development ONLY (see src/lib/auth/auth.ts) so `pnpm dev` works out of the box.
+  BETTER_AUTH_SECRET: z.string().min(1).optional(),
+  // Canonical origin Better Auth issues links against (password-reset/verification emails,
+  // redirect validation). Also doubles as the one entry in `trustedOrigins` unless overridden.
+  APP_BASE_URL: z.url({ error: "APP_BASE_URL must be a valid URL" }).default("http://localhost:3000"),
+
+  // === Transactional mail (password reset / email verification) ===
+  // Minimal HTTP-API mail adapter (see src/lib/mail/send.ts) — Resend-compatible request
+  // shape. Both must be present for mail to actually send; either missing means "not
+  // configured" (safe no-op, never a fake success) rather than a startup crash.
+  MAIL_API_KEY: z.string().min(1).optional(),
+  MAIL_FROM: z.string().min(1).optional(),
+
+  // === Stripe (test mode only in this milestone) ===
+  // All four optional: local dev/tests must work with billing entirely absent (see
+  // src/lib/billing/stripe.ts) — FREE plan works, paid buttons show a truthful
+  // "billing not configured" state, and the webhook route fails closed.
+  STRIPE_SECRET_KEY: z.string().min(1).optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
+  STRIPE_PRICE_BASIC: z.string().min(1).optional(),
+  STRIPE_PRICE_PLUS: z.string().min(1).optional(),
+
+  // === Trust / legal shell (see src/app/(legal)/*, src/lib/legal-shell/config.ts) ===
+  // Plain informational placeholders, never invented — absence renders a generic fallback in
+  // the draft legal copy rather than a fabricated company identity.
+  COMPANY_NAME: z.string().min(1).optional(),
+  CONTACT_EMAIL: z.string().min(1).optional(),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

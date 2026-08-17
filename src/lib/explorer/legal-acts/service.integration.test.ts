@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { explorerSavedItems, legalActResources, legalActVersions, legalActs, legalProvisions } from "../../../db/schema";
+import { explorerSavedItems, legalActResources, legalActVersions, legalActs, legalProvisions, user } from "../../../db/schema";
 import { createTestDatabase } from "../../test-support/test-db";
 import { buildContentKey } from "../saved/content-key";
 import { createSavedItem, getSavedItem } from "../saved/service";
@@ -367,6 +367,11 @@ describeDatabase("Save-provision integration (reuses the existing Saved service)
 
   beforeEach(async () => {
     if (!db) return;
+    // Real FK fixture row for `userId` — reused as both the "visitorId" and "userId" for this fake identity.
+    await db
+      .insert(user)
+      .values([{ id: VISITOR, name: "Visitor", email: "legal-acts-visitor@test.local", emailVerified: false, createdAt: new Date(), updatedAt: new Date() }])
+      .onConflictDoNothing();
     await db.delete(legalActs).where(eq(legalActs.source, TEST_SOURCE));
     await db.delete(explorerSavedItems).where(eq(explorerSavedItems.visitorId, VISITOR));
   });
@@ -395,6 +400,7 @@ describeDatabase("Save-provision integration (reuses the existing Saved service)
     const result = await createSavedItem({
       db,
       visitorId: VISITOR,
+      userId: VISITOR,
       kind: "provision",
       title: `${snapshot.citationLabel} — ${snapshot.actTitle}`,
       snapshot,
@@ -405,7 +411,7 @@ describeDatabase("Save-provision integration (reuses the existing Saved service)
     expect(result.status).toBe("created");
     if (result.status !== "created") throw new Error("unreachable");
 
-    const saved = await getSavedItem({ db, visitorId: VISITOR, id: result.id });
+    const saved = await getSavedItem({ db, userId: VISITOR, id: result.id });
     expect(saved?.snapshot).toEqual(snapshot);
   });
 });

@@ -67,6 +67,8 @@ function parseRow(row: typeof explorerHistoryEntries.$inferSelect): HistoryEntry
 export interface CreateHistoryEntryInput {
   db: Db;
   visitorId: string;
+  /** Real ownership (see src/lib/auth/session.ts) — required since Production & Monetization v1: /explorer is now auth-only, so every new write is always attributed to a real authenticated user. */
+  userId: string;
   query: string;
   status: ExplorerHistoryStatus;
   snapshot: ExplorerHistorySnapshot;
@@ -91,11 +93,15 @@ export async function createHistoryEntry(input: CreateHistoryEntryInput): Promis
   if (!input.visitorId) {
     throw new HistoryServiceError("createHistoryEntry requires a visitorId");
   }
+  if (!input.userId) {
+    throw new HistoryServiceError("createHistoryEntry requires a userId");
+  }
 
   const [row] = await input.db
     .insert(explorerHistoryEntries)
     .values({
       visitorId: input.visitorId,
+      userId: input.userId,
       query: input.query,
       status,
       resultSnapshot: snapshot,
@@ -113,13 +119,13 @@ const DEFAULT_LIST_LIMIT = 100;
 
 export interface ListHistoryEntriesInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   limit?: number;
 }
 
-/** Newest first, bounded by a simple limit (default/hard cap 100) — no unbounded history load, no elaborate pagination. */
+/** Newest first, bounded by a simple limit (default/hard cap 100) — no unbounded history load, no elaborate pagination. Owner-scoped: rows with a different (or null, i.e. legacy pre-auth) userId are never returned. */
 export async function listHistoryEntries(input: ListHistoryEntriesInput): Promise<HistoryEntryRecord[]> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return [];
   }
 
@@ -128,7 +134,7 @@ export async function listHistoryEntries(input: ListHistoryEntriesInput): Promis
   const rows = await input.db
     .select()
     .from(explorerHistoryEntries)
-    .where(eq(explorerHistoryEntries.visitorId, input.visitorId))
+    .where(eq(explorerHistoryEntries.userId, input.userId))
     .orderBy(desc(explorerHistoryEntries.createdAt))
     .limit(limit);
 
@@ -137,20 +143,20 @@ export async function listHistoryEntries(input: ListHistoryEntriesInput): Promis
 
 export interface GetHistoryEntryInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   id: string;
 }
 
-/** Returns null both when the entry doesn't exist AND when it belongs to a different visitor — the caller can't distinguish the two, by design. */
+/** Returns null both when the entry doesn't exist AND when it belongs to a different owner — the caller can't distinguish the two, by design. */
 export async function getHistoryEntry(input: GetHistoryEntryInput): Promise<HistoryEntryRecord | null> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return null;
   }
 
   const [row] = await input.db
     .select()
     .from(explorerHistoryEntries)
-    .where(and(eq(explorerHistoryEntries.id, input.id), eq(explorerHistoryEntries.visitorId, input.visitorId)))
+    .where(and(eq(explorerHistoryEntries.id, input.id), eq(explorerHistoryEntries.userId, input.userId)))
     .limit(1);
 
   return row ? parseRow(row) : null;
@@ -158,39 +164,39 @@ export async function getHistoryEntry(input: GetHistoryEntryInput): Promise<Hist
 
 export interface DeleteHistoryEntryInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   id: string;
 }
 
-/** Scoped delete — a non-existent id or an id owned by another visitor is silently a no-op, never an error. */
+/** Scoped delete — a non-existent id or an id owned by another user is silently a no-op, never an error. */
 export async function deleteHistoryEntry(input: DeleteHistoryEntryInput): Promise<void> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return;
   }
 
   await input.db
     .delete(explorerHistoryEntries)
-    .where(and(eq(explorerHistoryEntries.id, input.id), eq(explorerHistoryEntries.visitorId, input.visitorId)));
+    .where(and(eq(explorerHistoryEntries.id, input.id), eq(explorerHistoryEntries.userId, input.userId)));
 }
 
 export type ClearHistoryScope = "all" | "last_7_days" | "last_30_days" | "custom";
 
 export interface ClearHistoryInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   scope: ClearHistoryScope;
   /** Required (and only used) when scope === "custom". */
   from?: Date;
   to?: Date;
 }
 
-/** Always visitor-scoped. "custom" requires both `from` and `to`; other scopes ignore them. */
+/** Always owner-scoped. "custom" requires both `from` and `to`; other scopes ignore them. */
 export async function clearHistory(input: ClearHistoryInput): Promise<void> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return;
   }
 
-  const visitorCondition = eq(explorerHistoryEntries.visitorId, input.visitorId);
+  const visitorCondition = eq(explorerHistoryEntries.userId, input.userId);
 
   if (input.scope === "all") {
     await input.db.delete(explorerHistoryEntries).where(visitorCondition);
@@ -222,16 +228,16 @@ export async function clearHistory(input: ClearHistoryInput): Promise<void> {
  * rows" and both deciding "nothing to trim" — the second write always sees the first's
  * cleanup effects before running its own.
  */
-async function lockVisitorForHistoryCleanup(tx: Db, visitorId: string): Promise<void> {
-  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${visitorId} || ':explorer-history'))`);
+async function lockVisitorForHistoryCleanup(tx: Db, userId: string): Promise<void> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userId} || ':explorer-history'))`);
 }
 
 export interface CleanupHistoryInput {
   db: Db;
-  visitorId: string;
+  userId: string;
   /** Entries with created_at strictly older than (now - retentionDays) are deleted. */
   retentionDays: number;
-  /** After retention cleanup, only the newest maxEntries rows for this visitor are kept. */
+  /** After retention cleanup, only the newest maxEntries rows for this owner are kept. */
   maxEntries: number;
 }
 
@@ -270,28 +276,28 @@ function assertValidCleanupLimits(retentionDays: number, maxEntries: number): vo
  * rejected promise here as non-fatal to whatever triggered the call.
  */
 export async function cleanupHistoryForVisitor(input: CleanupHistoryInput): Promise<void> {
-  if (!input.visitorId) {
+  if (!input.userId) {
     return;
   }
 
   assertValidCleanupLimits(input.retentionDays, input.maxEntries);
 
   await input.db.transaction(async (tx) => {
-    await lockVisitorForHistoryCleanup(tx, input.visitorId);
+    await lockVisitorForHistoryCleanup(tx, input.userId);
 
     const retentionCutoff = new Date(Date.now() - input.retentionDays * 24 * 60 * 60 * 1000);
     await tx
       .delete(explorerHistoryEntries)
-      .where(and(eq(explorerHistoryEntries.visitorId, input.visitorId), lt(explorerHistoryEntries.createdAt, retentionCutoff)));
+      .where(and(eq(explorerHistoryEntries.userId, input.userId), lt(explorerHistoryEntries.createdAt, retentionCutoff)));
 
-    // Keep only the newest maxEntries rows for this visitor; delete the rest. Written as a
+    // Keep only the newest maxEntries rows for this owner; delete the rest. Written as a
     // single statement (rather than select-ids-then-delete) so it stays correct under the
     // advisory lock without a second round trip.
     await tx.execute(sql`
       delete from ${explorerHistoryEntries}
       where id in (
         select id from ${explorerHistoryEntries}
-        where visitor_id = ${input.visitorId}
+        where user_id = ${input.userId}
         order by created_at desc, id desc
         offset ${input.maxEntries}
       )

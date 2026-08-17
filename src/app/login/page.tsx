@@ -1,7 +1,7 @@
-import Link from "next/link";
+import { Suspense } from "react";
 import { LockKeyhole, Scale, ShieldCheck } from "lucide-react";
 
-import { Input } from "@/components/ui/input";
+import { LoginForm } from "@/components/auth/login-form";
 
 export default function LoginPage() {
   return (
@@ -38,72 +38,9 @@ export default function LoginPage() {
           </aside>
 
           <div className="flex items-center p-6 md:p-10">
-            <form className="w-full space-y-5">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">Logowanie</p>
-                <h2 className="mt-2 text-3xl font-semibold tracking-tight text-foreground">Zaloguj się</h2>
-                <p className="mt-2 text-sm text-muted-foreground">Wejdź do Velantis Legal Explorer i kontynuuj pracę z przepisami.</p>
-              </div>
-
-              <div>
-                <label htmlFor="login-email" className="mb-2 block text-sm text-muted-foreground">
-                  E-mail
-                </label>
-                <Input id="login-email" type="email" placeholder="name@firma.pl" className="h-11 bg-surface-secondary" />
-              </div>
-
-              <div>
-                <label htmlFor="login-password" className="mb-2 block text-sm text-muted-foreground">
-                  Hasło
-                </label>
-                <Input id="login-password" type="password" placeholder="••••••••" className="h-11 bg-surface-secondary" />
-              </div>
-
-              <div className="flex items-center justify-between text-sm text-muted-foreground">
-                <label className="inline-flex items-center gap-2">
-                  <input type="checkbox" className="h-4 w-4 rounded border border-border bg-surface-secondary" />
-                  Zapamiętaj mnie
-                </label>
-                <Link href="/forgot-password" className="text-foreground underline underline-offset-4">
-                  Nie pamiętasz hasła?
-                </Link>
-              </div>
-
-              <button
-                type="button"
-                className="w-full rounded-lg border border-border bg-surface-secondary px-3 py-2.5 text-sm font-medium text-foreground transition hover:bg-hover-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                Zaloguj się
-              </button>
-
-              <div className="flex items-center gap-3 text-xs uppercase tracking-[0.18em] text-muted-foreground">
-                <span className="h-px flex-1 bg-border" />
-                LUB
-                <span className="h-px flex-1 bg-border" />
-              </div>
-
-              <div className="grid gap-2">
-                <button
-                  type="button"
-                  className="w-full rounded-lg border border-border bg-transparent px-3 py-2 text-sm text-foreground transition hover:bg-hover-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  Kontynuuj z Google
-                </button>
-                <button
-                  type="button"
-                  className="w-full rounded-lg border border-border bg-transparent px-3 py-2 text-sm text-foreground transition hover:bg-hover-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  Kontynuuj z Microsoft
-                </button>
-              </div>
-
-              <p className="text-sm text-muted-foreground">
-                Nie masz konta?{" "}
-                <Link href="/register" className="text-foreground underline underline-offset-4">
-                  Utwórz konto
-                </Link>
-              </p>
-            </form>
+            <Suspense>
+              <LoginForm />
+            </Suspense>
           </div>
         </div>
       </section>

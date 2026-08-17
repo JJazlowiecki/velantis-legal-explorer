@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { explorerSavedFolders, explorerSavedItems } from "../../../db/schema";
+import { explorerSavedFolders, explorerSavedItems, user } from "../../../db/schema";
 import { createTestDatabase } from "../../test-support/test-db";
 import type { SavedAnswerSnapshot, SavedProvisionSnapshot, SavedSearchSnapshot } from "./snapshot";
 import {
@@ -53,9 +53,22 @@ afterAll(async () => {
   await client?.end({ timeout: 1 });
 });
 
+/** Real FK fixture rows for `userId` — reused as both the "visitorId" and "userId" for each fake identity. */
+async function seedFixtureUsers(): Promise<void> {
+  if (!db) return;
+  await db
+    .insert(user)
+    .values([
+      { id: VISITOR_A, name: "Visitor A", email: "saved-visitor-a@test.local", emailVerified: false, createdAt: new Date(), updatedAt: new Date() },
+      { id: VISITOR_B, name: "Visitor B", email: "saved-visitor-b@test.local", emailVerified: false, createdAt: new Date(), updatedAt: new Date() },
+    ])
+    .onConflictDoNothing();
+}
+
 describeDatabase("explorer saved service", () => {
   beforeEach(async () => {
     if (!db) return;
+    await seedFixtureUsers();
     await db.delete(explorerSavedItems).where(eq(explorerSavedItems.visitorId, VISITOR_A));
     await db.delete(explorerSavedItems).where(eq(explorerSavedItems.visitorId, VISITOR_B));
     await db.delete(explorerSavedFolders).where(eq(explorerSavedFolders.visitorId, VISITOR_A));
@@ -65,66 +78,67 @@ describeDatabase("explorer saved service", () => {
   describe("folders", () => {
     it("creates a folder", async () => {
       if (!db) throw new Error("unreachable");
-      const result = await createSavedFolder({ db, visitorId: VISITOR_A, name: "Prawo pracy" });
+      const result = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "Prawo pracy" });
       expect(result.status).toBe("created");
 
-      const folders = await listSavedFolders({ db, visitorId: VISITOR_A });
+      const folders = await listSavedFolders({ db, userId: VISITOR_A });
       expect(folders).toHaveLength(1);
       expect(folders[0].name).toBe("Prawo pracy");
     });
 
     it("trims whitespace and rejects a blank name", async () => {
       if (!db) throw new Error("unreachable");
-      const created = await createSavedFolder({ db, visitorId: VISITOR_A, name: "  Umowy  " });
+      const created = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "  Umowy  " });
       expect(created).toMatchObject({ status: "created" });
-      const [folder] = await listSavedFolders({ db, visitorId: VISITOR_A });
+      const [folder] = await listSavedFolders({ db, userId: VISITOR_A });
       expect(folder.name).toBe("Umowy");
 
-      const blank = await createSavedFolder({ db, visitorId: VISITOR_A, name: "   " });
+      const blank = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "   " });
       expect(blank).toMatchObject({ status: "invalid_name" });
     });
 
     it("rejects a case-insensitive duplicate folder name for the same visitor", async () => {
       if (!db) throw new Error("unreachable");
-      await createSavedFolder({ db, visitorId: VISITOR_A, name: "Prawo pracy" });
-      const duplicate = await createSavedFolder({ db, visitorId: VISITOR_A, name: "prawo PRACY" });
+      await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "Prawo pracy" });
+      const duplicate = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "prawo PRACY" });
       expect(duplicate).toMatchObject({ status: "duplicate_name" });
 
       // the same name is fine for a different visitor
-      const otherVisitor = await createSavedFolder({ db, visitorId: VISITOR_B, name: "Prawo pracy" });
+      const otherVisitor = await createSavedFolder({ db, visitorId: VISITOR_B, userId: VISITOR_B, name: "Prawo pracy" });
       expect(otherVisitor).toMatchObject({ status: "created" });
     });
 
     it("renames a folder", async () => {
       if (!db) throw new Error("unreachable");
-      const created = await createSavedFolder({ db, visitorId: VISITOR_A, name: "Stara nazwa" });
+      const created = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "Stara nazwa" });
       if (created.status !== "created") throw new Error("unreachable");
 
-      const renamed = await renameSavedFolder({ db, visitorId: VISITOR_A, id: created.id, name: "Nowa nazwa" });
+      const renamed = await renameSavedFolder({ db, userId: VISITOR_A, id: created.id, name: "Nowa nazwa" });
       expect(renamed).toMatchObject({ status: "renamed" });
 
-      const [folder] = await listSavedFolders({ db, visitorId: VISITOR_A });
+      const [folder] = await listSavedFolders({ db, userId: VISITOR_A });
       expect(folder.name).toBe("Nowa nazwa");
     });
 
     it("rejects renaming a folder to a name that duplicates another of the visitor's folders", async () => {
       if (!db) throw new Error("unreachable");
-      await createSavedFolder({ db, visitorId: VISITOR_A, name: "Folder A" });
-      const second = await createSavedFolder({ db, visitorId: VISITOR_A, name: "Folder B" });
+      await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "Folder A" });
+      const second = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "Folder B" });
       if (second.status !== "created") throw new Error("unreachable");
 
-      const result = await renameSavedFolder({ db, visitorId: VISITOR_A, id: second.id, name: "folder a" });
+      const result = await renameSavedFolder({ db, userId: VISITOR_A, id: second.id, name: "folder a" });
       expect(result).toMatchObject({ status: "duplicate_name" });
     });
 
     it("deleting a folder leaves its items saved, unfiled ('Bez folderu')", async () => {
       if (!db) throw new Error("unreachable");
-      const folder = await createSavedFolder({ db, visitorId: VISITOR_A, name: "Do usunięcia" });
+      const folder = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "Do usunięcia" });
       if (folder.status !== "created") throw new Error("unreachable");
 
       const item = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "answer",
         title: "Tytuł",
         query: ANSWER_SNAPSHOT.query,
@@ -135,12 +149,12 @@ describeDatabase("explorer saved service", () => {
       });
       if (item.status !== "created") throw new Error("unreachable");
 
-      await deleteSavedFolder({ db, visitorId: VISITOR_A, id: folder.id });
+      await deleteSavedFolder({ db, userId: VISITOR_A, id: folder.id });
 
-      const folders = await listSavedFolders({ db, visitorId: VISITOR_A });
+      const folders = await listSavedFolders({ db, userId: VISITOR_A });
       expect(folders).toHaveLength(0);
 
-      const record = await getSavedItem({ db, visitorId: VISITOR_A, id: item.id });
+      const record = await getSavedItem({ db, userId: VISITOR_A, id: item.id });
       expect(record).not.toBeNull();
       expect(record?.folderId).toBeNull();
     });
@@ -152,6 +166,7 @@ describeDatabase("explorer saved service", () => {
       const result = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "answer",
         title: "Tytuł odpowiedzi",
         query: ANSWER_SNAPSHOT.query,
@@ -162,7 +177,7 @@ describeDatabase("explorer saved service", () => {
       });
       expect(result.status).toBe("created");
 
-      const items = await listSavedItems({ db, visitorId: VISITOR_A });
+      const items = await listSavedItems({ db, userId: VISITOR_A });
       expect(items).toHaveLength(1);
       expect(items[0].kind).toBe("answer");
       expect(items[0].snapshot).toEqual(ANSWER_SNAPSHOT);
@@ -173,6 +188,7 @@ describeDatabase("explorer saved service", () => {
       const result = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "search",
         title: SEARCH_SNAPSHOT.query,
         query: SEARCH_SNAPSHOT.query,
@@ -183,7 +199,7 @@ describeDatabase("explorer saved service", () => {
       });
       expect(result.status).toBe("created");
 
-      const items = await listSavedItems({ db, visitorId: VISITOR_A });
+      const items = await listSavedItems({ db, userId: VISITOR_A });
       expect(items[0].kind).toBe("search");
       expect(items[0].snapshot).toEqual(SEARCH_SNAPSHOT);
     });
@@ -193,6 +209,7 @@ describeDatabase("explorer saved service", () => {
       const result = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "art. 471 — Ustawa testowa",
         query: null,
@@ -203,7 +220,7 @@ describeDatabase("explorer saved service", () => {
       });
       expect(result.status).toBe("created");
 
-      const items = await listSavedItems({ db, visitorId: VISITOR_A });
+      const items = await listSavedItems({ db, userId: VISITOR_A });
       expect(items[0].kind).toBe("provision");
       expect(items[0].snapshot).toEqual(PROVISION_SNAPSHOT);
     });
@@ -213,6 +230,7 @@ describeDatabase("explorer saved service", () => {
       const first = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "art. 471",
         query: null,
@@ -226,6 +244,7 @@ describeDatabase("explorer saved service", () => {
       const second = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "art. 471 (klik ponownie)",
         query: null,
@@ -238,18 +257,19 @@ describeDatabase("explorer saved service", () => {
       if (first.status !== "created" || second.status !== "already_saved") throw new Error("unreachable");
       expect(second.id).toBe(first.id);
 
-      const items = await listSavedItems({ db, visitorId: VISITOR_A });
+      const items = await listSavedItems({ db, userId: VISITOR_A });
       expect(items).toHaveLength(1);
     });
 
     it("rejects saving into a folder that does not belong to the visitor", async () => {
       if (!db) throw new Error("unreachable");
-      const foreignFolder = await createSavedFolder({ db, visitorId: VISITOR_B, name: "Folder B" });
+      const foreignFolder = await createSavedFolder({ db, visitorId: VISITOR_B, userId: VISITOR_B, name: "Folder B" });
       if (foreignFolder.status !== "created") throw new Error("unreachable");
 
       const result = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "art. 471",
         query: null,
@@ -270,6 +290,7 @@ describeDatabase("explorer saved service", () => {
         const result = await createSavedItem({
           db,
           visitorId: VISITOR_A,
+          userId: VISITOR_A,
           kind: "provision",
           title: `Przepis ${i}`,
           query: null,
@@ -284,6 +305,7 @@ describeDatabase("explorer saved service", () => {
       const blocked = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "Przepis 4",
         query: null,
@@ -294,19 +316,20 @@ describeDatabase("explorer saved service", () => {
       });
       expect(blocked).toMatchObject({ status: "quota_exceeded", limit: 3 });
 
-      const items = await listSavedItems({ db, visitorId: VISITOR_A });
+      const items = await listSavedItems({ db, userId: VISITOR_A });
       expect(items).toHaveLength(3);
     });
 
     it("folders do not count toward the item quota", async () => {
       if (!db) throw new Error("unreachable");
       for (let i = 0; i < 5; i += 1) {
-        await createSavedFolder({ db, visitorId: VISITOR_A, name: `Folder ${i}` });
+        await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: `Folder ${i}` });
       }
 
       const result = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "Przepis",
         query: null,
@@ -325,6 +348,7 @@ describeDatabase("explorer saved service", () => {
         createSavedItem({
           db,
           visitorId: VISITOR_A,
+          userId: VISITOR_A,
           kind: "provision",
           title: `Przepis ${i}`,
           query: null,
@@ -342,7 +366,7 @@ describeDatabase("explorer saved service", () => {
       expect(created).toHaveLength(5);
       expect(quotaExceeded).toHaveLength(3);
 
-      const items = await listSavedItems({ db, visitorId: VISITOR_A });
+      const items = await listSavedItems({ db, userId: VISITOR_A });
       expect(items).toHaveLength(5);
     });
 
@@ -351,6 +375,7 @@ describeDatabase("explorer saved service", () => {
       await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "Przepis",
         query: null,
@@ -360,7 +385,7 @@ describeDatabase("explorer saved service", () => {
         maxItems: 100,
       });
 
-      const usage = await getSavedUsage({ db, visitorId: VISITOR_A, maxItems: 100 });
+      const usage = await getSavedUsage({ db, userId: VISITOR_A, maxItems: 100 });
       expect(usage).toEqual({ count: 1, max: 100 });
     });
   });
@@ -368,13 +393,14 @@ describeDatabase("explorer saved service", () => {
   describe("move / delete", () => {
     it("moves an item between the visitor's own folders", async () => {
       if (!db) throw new Error("unreachable");
-      const folderOne = await createSavedFolder({ db, visitorId: VISITOR_A, name: "Folder 1" });
-      const folderTwo = await createSavedFolder({ db, visitorId: VISITOR_A, name: "Folder 2" });
+      const folderOne = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "Folder 1" });
+      const folderTwo = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "Folder 2" });
       if (folderOne.status !== "created" || folderTwo.status !== "created") throw new Error("unreachable");
 
       const item = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "Przepis",
         query: null,
@@ -385,21 +411,22 @@ describeDatabase("explorer saved service", () => {
       });
       if (item.status !== "created") throw new Error("unreachable");
 
-      const moved = await moveSavedItem({ db, visitorId: VISITOR_A, id: item.id, folderId: folderTwo.id });
+      const moved = await moveSavedItem({ db, userId: VISITOR_A, id: item.id, folderId: folderTwo.id });
       expect(moved).toMatchObject({ status: "moved" });
 
-      const record = await getSavedItem({ db, visitorId: VISITOR_A, id: item.id });
+      const record = await getSavedItem({ db, userId: VISITOR_A, id: item.id });
       expect(record?.folderId).toBe(folderTwo.id);
     });
 
     it("moves an item out of a folder to 'Bez folderu' (folderId null)", async () => {
       if (!db) throw new Error("unreachable");
-      const folder = await createSavedFolder({ db, visitorId: VISITOR_A, name: "Folder" });
+      const folder = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "Folder" });
       if (folder.status !== "created") throw new Error("unreachable");
 
       const item = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "Przepis",
         query: null,
@@ -410,10 +437,10 @@ describeDatabase("explorer saved service", () => {
       });
       if (item.status !== "created") throw new Error("unreachable");
 
-      const moved = await moveSavedItem({ db, visitorId: VISITOR_A, id: item.id, folderId: null });
+      const moved = await moveSavedItem({ db, userId: VISITOR_A, id: item.id, folderId: null });
       expect(moved).toMatchObject({ status: "moved" });
 
-      const record = await getSavedItem({ db, visitorId: VISITOR_A, id: item.id });
+      const record = await getSavedItem({ db, userId: VISITOR_A, id: item.id });
       expect(record?.folderId).toBeNull();
     });
 
@@ -422,6 +449,7 @@ describeDatabase("explorer saved service", () => {
       const item = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "Przepis",
         query: null,
@@ -432,11 +460,11 @@ describeDatabase("explorer saved service", () => {
       });
       if (item.status !== "created") throw new Error("unreachable");
 
-      await deleteSavedItem({ db, visitorId: VISITOR_A, id: item.id });
-      expect(await getSavedItem({ db, visitorId: VISITOR_A, id: item.id })).toBeNull();
+      await deleteSavedItem({ db, userId: VISITOR_A, id: item.id });
+      expect(await getSavedItem({ db, userId: VISITOR_A, id: item.id })).toBeNull();
 
       // deleting again (already gone) is a safe no-op
-      await expect(deleteSavedItem({ db, visitorId: VISITOR_A, id: item.id })).resolves.toBeUndefined();
+      await expect(deleteSavedItem({ db, userId: VISITOR_A, id: item.id })).resolves.toBeUndefined();
     });
   });
 
@@ -446,6 +474,7 @@ describeDatabase("explorer saved service", () => {
       await createSavedItem({
         db,
         visitorId: VISITOR_B,
+        userId: VISITOR_B,
         kind: "provision",
         title: "Przepis B",
         query: null,
@@ -455,7 +484,7 @@ describeDatabase("explorer saved service", () => {
         maxItems: 100,
       });
 
-      const itemsForA = await listSavedItems({ db, visitorId: VISITOR_A });
+      const itemsForA = await listSavedItems({ db, userId: VISITOR_A });
       expect(itemsForA).toHaveLength(0);
     });
 
@@ -464,6 +493,7 @@ describeDatabase("explorer saved service", () => {
       const item = await createSavedItem({
         db,
         visitorId: VISITOR_B,
+        userId: VISITOR_B,
         kind: "provision",
         title: "Przepis B",
         query: null,
@@ -474,7 +504,7 @@ describeDatabase("explorer saved service", () => {
       });
       if (item.status !== "created") throw new Error("unreachable");
 
-      expect(await getSavedItem({ db, visitorId: VISITOR_A, id: item.id })).toBeNull();
+      expect(await getSavedItem({ db, userId: VISITOR_A, id: item.id })).toBeNull();
     });
 
     it("visitor A cannot delete visitor B's item even with its exact id", async () => {
@@ -482,6 +512,7 @@ describeDatabase("explorer saved service", () => {
       const item = await createSavedItem({
         db,
         visitorId: VISITOR_B,
+        userId: VISITOR_B,
         kind: "provision",
         title: "Przepis B",
         query: null,
@@ -492,9 +523,9 @@ describeDatabase("explorer saved service", () => {
       });
       if (item.status !== "created") throw new Error("unreachable");
 
-      await deleteSavedItem({ db, visitorId: VISITOR_A, id: item.id });
+      await deleteSavedItem({ db, userId: VISITOR_A, id: item.id });
 
-      const stillThere = await getSavedItem({ db, visitorId: VISITOR_B, id: item.id });
+      const stillThere = await getSavedItem({ db, userId: VISITOR_B, id: item.id });
       expect(stillThere).not.toBeNull();
     });
 
@@ -503,6 +534,7 @@ describeDatabase("explorer saved service", () => {
       const item = await createSavedItem({
         db,
         visitorId: VISITOR_B,
+        userId: VISITOR_B,
         kind: "provision",
         title: "Przepis B",
         query: null,
@@ -513,21 +545,22 @@ describeDatabase("explorer saved service", () => {
       });
       if (item.status !== "created") throw new Error("unreachable");
 
-      const folderA = await createSavedFolder({ db, visitorId: VISITOR_A, name: "Folder A" });
+      const folderA = await createSavedFolder({ db, visitorId: VISITOR_A, userId: VISITOR_A, name: "Folder A" });
       if (folderA.status !== "created") throw new Error("unreachable");
 
-      const result = await moveSavedItem({ db, visitorId: VISITOR_A, id: item.id, folderId: folderA.id });
+      const result = await moveSavedItem({ db, userId: VISITOR_A, id: item.id, folderId: folderA.id });
       expect(result).toMatchObject({ status: "item_not_found" });
     });
 
     it("visitor A cannot move their own item into visitor B's folder merely because the folder UUID is valid", async () => {
       if (!db) throw new Error("unreachable");
-      const folderB = await createSavedFolder({ db, visitorId: VISITOR_B, name: "Folder B" });
+      const folderB = await createSavedFolder({ db, visitorId: VISITOR_B, userId: VISITOR_B, name: "Folder B" });
       if (folderB.status !== "created") throw new Error("unreachable");
 
       const itemA = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "Przepis A",
         query: null,
@@ -538,23 +571,23 @@ describeDatabase("explorer saved service", () => {
       });
       if (itemA.status !== "created") throw new Error("unreachable");
 
-      const result = await moveSavedItem({ db, visitorId: VISITOR_A, id: itemA.id, folderId: folderB.id });
+      const result = await moveSavedItem({ db, userId: VISITOR_A, id: itemA.id, folderId: folderB.id });
       expect(result).toMatchObject({ status: "folder_not_found" });
 
-      const record = await getSavedItem({ db, visitorId: VISITOR_A, id: itemA.id });
+      const record = await getSavedItem({ db, userId: VISITOR_A, id: itemA.id });
       expect(record?.folderId).toBeNull();
     });
 
     it("visitor A cannot rename or delete visitor B's folder", async () => {
       if (!db) throw new Error("unreachable");
-      const folderB = await createSavedFolder({ db, visitorId: VISITOR_B, name: "Folder B" });
+      const folderB = await createSavedFolder({ db, visitorId: VISITOR_B, userId: VISITOR_B, name: "Folder B" });
       if (folderB.status !== "created") throw new Error("unreachable");
 
-      const renameResult = await renameSavedFolder({ db, visitorId: VISITOR_A, id: folderB.id, name: "Zhakowane" });
+      const renameResult = await renameSavedFolder({ db, userId: VISITOR_A, id: folderB.id, name: "Zhakowane" });
       expect(renameResult).toMatchObject({ status: "not_found" });
 
-      await deleteSavedFolder({ db, visitorId: VISITOR_A, id: folderB.id });
-      const foldersForB = await listSavedFolders({ db, visitorId: VISITOR_B });
+      await deleteSavedFolder({ db, userId: VISITOR_A, id: folderB.id });
+      const foldersForB = await listSavedFolders({ db, userId: VISITOR_B });
       expect(foldersForB).toHaveLength(1);
     });
   });
@@ -565,6 +598,7 @@ describeDatabase("explorer saved service", () => {
       const item = await createSavedItem({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         kind: "provision",
         title: "Przepis",
         query: null,
@@ -577,8 +611,8 @@ describeDatabase("explorer saved service", () => {
 
       await db.update(explorerSavedItems).set({ snapshot: { totally: "not a valid snapshot" } }).where(eq(explorerSavedItems.id, item.id));
 
-      expect(await listSavedItems({ db, visitorId: VISITOR_A })).toEqual([]);
-      expect(await getSavedItem({ db, visitorId: VISITOR_A, id: item.id })).toBeNull();
+      expect(await listSavedItems({ db, userId: VISITOR_A })).toEqual([]);
+      expect(await getSavedItem({ db, userId: VISITOR_A, id: item.id })).toBeNull();
     });
   });
 });

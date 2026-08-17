@@ -3,29 +3,29 @@
 import { revalidatePath } from "next/cache";
 
 import { getDb } from "@/db";
+import { getCurrentUser } from "@/lib/auth/session";
 import { clearHistory, deleteHistoryEntry, listHistoryEntries, type ClearHistoryScope } from "@/lib/explorer/history/service";
-import { getVisitorId } from "@/lib/explorer/history/visitor";
 import { toHistoryListItem, type HistoryListItem } from "@/lib/explorer/history/list-view";
 
-/** Visitor-scoped, bounded list (newest first) — see listHistoryEntries for the limit. */
+/** Owner-scoped, bounded list (newest first) — see listHistoryEntries for the limit. Identity comes only from the server session, never client input. */
 export async function listExplorerHistory(): Promise<HistoryListItem[]> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return [];
   }
 
-  const entries = await listHistoryEntries({ db: getDb(), visitorId });
+  const entries = await listHistoryEntries({ db: getDb(), userId: user.id });
   return entries.map(toHistoryListItem);
 }
 
 export async function deleteExplorerHistoryEntry(id: string): Promise<{ ok: boolean }> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return { ok: true };
   }
 
   try {
-    await deleteHistoryEntry({ db: getDb(), visitorId, id });
+    await deleteHistoryEntry({ db: getDb(), userId: user.id, id });
     revalidatePath("/explorer/history");
     return { ok: true };
   } catch (error) {
@@ -42,15 +42,15 @@ export interface ClearExplorerHistoryInput {
 }
 
 export async function clearExplorerHistory(input: ClearExplorerHistoryInput): Promise<{ ok: boolean }> {
-  const visitorId = await getVisitorId();
-  if (!visitorId) {
+  const user = await getCurrentUser();
+  if (!user) {
     return { ok: true };
   }
 
   try {
     await clearHistory({
       db: getDb(),
-      visitorId,
+      userId: user.id,
       scope: input.scope,
       from: input.from ? new Date(input.from) : undefined,
       to: input.to ? new Date(input.to) : undefined,

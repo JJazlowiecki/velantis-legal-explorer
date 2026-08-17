@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
-import { explorerHistoryEntries, explorerSavedItems } from "../../../db/schema";
+import { explorerHistoryEntries, explorerSavedItems, user } from "../../../db/schema";
 import { buildContentKey } from "../saved/content-key";
 import { createSavedItem, getSavedItem } from "../saved/service";
 import type { SavedAnswerSnapshot } from "../saved/snapshot";
@@ -27,6 +27,18 @@ const VISITOR_A = "11111111-1111-4111-8111-111111111111";
 const VISITOR_B = "22222222-2222-4222-8222-222222222222";
 const CORPUS_VERSION_ID = "572d313e-ae03-4207-97c6-38e2e5088617";
 
+/** Real FK fixture rows for `userId` — reused as both the "visitorId" and "userId" for each fake identity. */
+async function seedFixtureUsers(): Promise<void> {
+  if (!db) return;
+  await db
+    .insert(user)
+    .values([
+      { id: VISITOR_A, name: "Visitor A", email: "history-visitor-a@test.local", emailVerified: false, createdAt: new Date(), updatedAt: new Date() },
+      { id: VISITOR_B, name: "Visitor B", email: "history-visitor-b@test.local", emailVerified: false, createdAt: new Date(), updatedAt: new Date() },
+    ])
+    .onConflictDoNothing();
+}
+
 function snapshot(overrides: Partial<ExplorerHistorySnapshot> = {}): ExplorerHistorySnapshot {
   return {
     status: "answered",
@@ -49,6 +61,7 @@ afterAll(async () => {
 describeDatabase("explorer history service", () => {
   beforeEach(async () => {
     if (!db) return;
+    await seedFixtureUsers();
     await db.delete(explorerHistoryEntries).where(eq(explorerHistoryEntries.visitorId, VISITOR_A));
     await db.delete(explorerHistoryEntries).where(eq(explorerHistoryEntries.visitorId, VISITOR_B));
   });
@@ -59,13 +72,14 @@ describeDatabase("explorer history service", () => {
     const created = await createHistoryEntry({
       db,
       visitorId: VISITOR_A,
+      userId: VISITOR_A,
       query: "opis problemu",
       status: "answered",
       snapshot: snapshot(),
       corpusVersionIds: [CORPUS_VERSION_ID],
     });
 
-    const fetched = await getHistoryEntry({ db, visitorId: VISITOR_A, id: created.id });
+    const fetched = await getHistoryEntry({ db, userId: VISITOR_A, id: created.id });
     expect(fetched).not.toBeNull();
     expect(fetched?.query).toBe("opis problemu");
     expect(fetched?.status).toBe("answered");
@@ -79,6 +93,7 @@ describeDatabase("explorer history service", () => {
     const first = await createHistoryEntry({
       db,
       visitorId: VISITOR_A,
+      userId: VISITOR_A,
       query: "pierwsze pytanie",
       status: "answered",
       snapshot: snapshot(),
@@ -88,13 +103,14 @@ describeDatabase("explorer history service", () => {
     const second = await createHistoryEntry({
       db,
       visitorId: VISITOR_A,
+      userId: VISITOR_A,
       query: "drugie pytanie",
       status: "insufficient_evidence",
       snapshot: snapshot({ status: "insufficient_evidence", conclusions: [], citedSources: [] }),
       corpusVersionIds: [CORPUS_VERSION_ID],
     });
 
-    const list = await listHistoryEntries({ db, visitorId: VISITOR_A });
+    const list = await listHistoryEntries({ db, userId: VISITOR_A });
     expect(list.map((entry) => entry.id)).toEqual([second.id, first.id]);
   });
 
@@ -105,6 +121,7 @@ describeDatabase("explorer history service", () => {
       await createHistoryEntry({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         query: `pytanie ${i}`,
         status: "answered",
         snapshot: snapshot(),
@@ -112,7 +129,7 @@ describeDatabase("explorer history service", () => {
       });
     }
 
-    const list = await listHistoryEntries({ db, visitorId: VISITOR_A, limit: 3 });
+    const list = await listHistoryEntries({ db, userId: VISITOR_A, limit: 3 });
     expect(list).toHaveLength(3);
   });
 
@@ -122,13 +139,14 @@ describeDatabase("explorer history service", () => {
     await createHistoryEntry({
       db,
       visitorId: VISITOR_B,
+      userId: VISITOR_B,
       query: "pytanie należące do B",
       status: "answered",
       snapshot: snapshot(),
       corpusVersionIds: [CORPUS_VERSION_ID],
     });
 
-    const listA = await listHistoryEntries({ db, visitorId: VISITOR_A });
+    const listA = await listHistoryEntries({ db, userId: VISITOR_A });
     expect(listA).toEqual([]);
   });
 
@@ -138,13 +156,14 @@ describeDatabase("explorer history service", () => {
     const created = await createHistoryEntry({
       db,
       visitorId: VISITOR_B,
+      userId: VISITOR_B,
       query: "pytanie należące do B",
       status: "answered",
       snapshot: snapshot(),
       corpusVersionIds: [CORPUS_VERSION_ID],
     });
 
-    const fetched = await getHistoryEntry({ db, visitorId: VISITOR_A, id: created.id });
+    const fetched = await getHistoryEntry({ db, userId: VISITOR_A, id: created.id });
     expect(fetched).toBeNull();
   });
 
@@ -154,15 +173,16 @@ describeDatabase("explorer history service", () => {
     const created = await createHistoryEntry({
       db,
       visitorId: VISITOR_B,
+      userId: VISITOR_B,
       query: "pytanie należące do B",
       status: "answered",
       snapshot: snapshot(),
       corpusVersionIds: [CORPUS_VERSION_ID],
     });
 
-    await deleteHistoryEntry({ db, visitorId: VISITOR_A, id: created.id });
+    await deleteHistoryEntry({ db, userId: VISITOR_A, id: created.id });
 
-    const stillThere = await getHistoryEntry({ db, visitorId: VISITOR_B, id: created.id });
+    const stillThere = await getHistoryEntry({ db, userId: VISITOR_B, id: created.id });
     expect(stillThere).not.toBeNull();
   });
 
@@ -172,76 +192,77 @@ describeDatabase("explorer history service", () => {
     const created = await createHistoryEntry({
       db,
       visitorId: VISITOR_A,
+      userId: VISITOR_A,
       query: "do usunięcia",
       status: "answered",
       snapshot: snapshot(),
       corpusVersionIds: [CORPUS_VERSION_ID],
     });
 
-    await deleteHistoryEntry({ db, visitorId: VISITOR_A, id: created.id });
+    await deleteHistoryEntry({ db, userId: VISITOR_A, id: created.id });
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: created.id })).toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: created.id })).toBeNull();
   });
 
   it("deleting a nonexistent id is a safe no-op", async () => {
     if (!db) throw new Error("unreachable");
     await expect(
-      deleteHistoryEntry({ db, visitorId: VISITOR_A, id: "00000000-0000-4000-8000-000000000000" }),
+      deleteHistoryEntry({ db, userId: VISITOR_A, id: "00000000-0000-4000-8000-000000000000" }),
     ).resolves.toBeUndefined();
   });
 
   it("clears all history for the visitor only", async () => {
     if (!db) throw new Error("unreachable");
 
-    await createHistoryEntry({ db, visitorId: VISITOR_A, query: "a1", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
-    await createHistoryEntry({ db, visitorId: VISITOR_A, query: "a2", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
-    await createHistoryEntry({ db, visitorId: VISITOR_B, query: "b1", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "a1", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "a2", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    await createHistoryEntry({ db, visitorId: VISITOR_B, userId: VISITOR_B, query: "b1", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
-    await clearHistory({ db, visitorId: VISITOR_A, scope: "all" });
+    await clearHistory({ db, userId: VISITOR_A, scope: "all" });
 
-    expect(await listHistoryEntries({ db, visitorId: VISITOR_A })).toEqual([]);
-    expect(await listHistoryEntries({ db, visitorId: VISITOR_B })).toHaveLength(1);
+    expect(await listHistoryEntries({ db, userId: VISITOR_A })).toEqual([]);
+    expect(await listHistoryEntries({ db, userId: VISITOR_B })).toHaveLength(1);
   });
 
   it("clears only entries within the last 7 days", async () => {
     if (!db) throw new Error("unreachable");
 
-    const recent = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "recent", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
-    const old = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "old", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const recent = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "recent", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const old = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "old", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
     await db
       .update(explorerHistoryEntries)
       .set({ createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) })
       .where(eq(explorerHistoryEntries.id, old.id));
 
-    await clearHistory({ db, visitorId: VISITOR_A, scope: "last_7_days" });
+    await clearHistory({ db, userId: VISITOR_A, scope: "last_7_days" });
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: recent.id })).toBeNull();
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: old.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: recent.id })).toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: old.id })).not.toBeNull();
   });
 
   it("clears only entries within the last 30 days", async () => {
     if (!db) throw new Error("unreachable");
 
-    const recent = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "recent", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
-    const veryOld = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "very old", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const recent = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "recent", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const veryOld = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "very old", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
     await db
       .update(explorerHistoryEntries)
       .set({ createdAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) })
       .where(eq(explorerHistoryEntries.id, veryOld.id));
 
-    await clearHistory({ db, visitorId: VISITOR_A, scope: "last_30_days" });
+    await clearHistory({ db, userId: VISITOR_A, scope: "last_30_days" });
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: recent.id })).toBeNull();
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: veryOld.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: recent.id })).toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: veryOld.id })).not.toBeNull();
   });
 
   it("clears only entries within a custom date range", async () => {
     if (!db) throw new Error("unreachable");
 
-    const inRange = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "in range", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
-    const outOfRange = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "out of range", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const inRange = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "in range", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const outOfRange = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "out of range", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
     const rangeStart = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000);
     const rangeEnd = new Date(Date.now() + 1 * 24 * 60 * 60 * 1000);
@@ -251,15 +272,15 @@ describeDatabase("explorer history service", () => {
       .set({ createdAt: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000) })
       .where(eq(explorerHistoryEntries.id, outOfRange.id));
 
-    await clearHistory({ db, visitorId: VISITOR_A, scope: "custom", from: rangeStart, to: rangeEnd });
+    await clearHistory({ db, userId: VISITOR_A, scope: "custom", from: rangeStart, to: rangeEnd });
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: inRange.id })).toBeNull();
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: outOfRange.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: inRange.id })).toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: outOfRange.id })).not.toBeNull();
   });
 
   it("throws when clearing with scope 'custom' but missing from/to", async () => {
     if (!db) throw new Error("unreachable");
-    await expect(clearHistory({ db, visitorId: VISITOR_A, scope: "custom" })).rejects.toThrow(HistoryServiceError);
+    await expect(clearHistory({ db, userId: VISITOR_A, scope: "custom" })).rejects.toThrow(HistoryServiceError);
   });
 
   it("a malformed persisted snapshot is excluded from list results rather than crashing", async () => {
@@ -268,6 +289,7 @@ describeDatabase("explorer history service", () => {
     const created = await createHistoryEntry({
       db,
       visitorId: VISITOR_A,
+      userId: VISITOR_A,
       query: "będzie zepsute",
       status: "answered",
       snapshot: snapshot(),
@@ -281,10 +303,10 @@ describeDatabase("explorer history service", () => {
       .set({ resultSnapshot: { totally: "not a valid snapshot" } })
       .where(eq(explorerHistoryEntries.id, created.id));
 
-    const list = await listHistoryEntries({ db, visitorId: VISITOR_A });
+    const list = await listHistoryEntries({ db, userId: VISITOR_A });
     expect(list.find((entry) => entry.id === created.id)).toBeUndefined();
 
-    const fetched = await getHistoryEntry({ db, visitorId: VISITOR_A, id: created.id });
+    const fetched = await getHistoryEntry({ db, userId: VISITOR_A, id: created.id });
     expect(fetched).toBeNull();
   });
 
@@ -295,6 +317,7 @@ describeDatabase("explorer history service", () => {
       createHistoryEntry({
         db,
         visitorId: VISITOR_A,
+        userId: VISITOR_A,
         query: "opis problemu",
         status: "answered",
         // @ts-expect-error deliberately malformed for the test
@@ -311,7 +334,7 @@ async function createEntryWithAge(
   ageDays: number,
 ): Promise<{ id: string }> {
   if (!db) throw new Error("unreachable");
-  const created = await createHistoryEntry({ db, visitorId, query, status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+  const created = await createHistoryEntry({ db, visitorId, userId: visitorId, query, status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
   await db
     .update(explorerHistoryEntries)
     .set({ createdAt: new Date(Date.now() - ageDays * 24 * 60 * 60 * 1000) })
@@ -322,6 +345,7 @@ async function createEntryWithAge(
 describeDatabase("cleanupHistoryForVisitor", () => {
   beforeEach(async () => {
     if (!db) return;
+    await seedFixtureUsers();
     await db.delete(explorerHistoryEntries).where(eq(explorerHistoryEntries.visitorId, VISITOR_A));
     await db.delete(explorerHistoryEntries).where(eq(explorerHistoryEntries.visitorId, VISITOR_B));
   });
@@ -330,18 +354,18 @@ describeDatabase("cleanupHistoryForVisitor", () => {
     if (!db) throw new Error("unreachable");
     const fresh = await createEntryWithAge(VISITOR_A, "fresh", 10);
 
-    await cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: 300 });
+    await cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: 300 });
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: fresh.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: fresh.id })).not.toBeNull();
   });
 
   it("deletes an entry older than the retention window", async () => {
     if (!db) throw new Error("unreachable");
     const stale = await createEntryWithAge(VISITOR_A, "stale", 120);
 
-    await cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: 300 });
+    await cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: 300 });
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: stale.id })).toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: stale.id })).toBeNull();
   });
 
   it("boundary: an entry just inside the retention window survives (strictly-older semantics)", async () => {
@@ -351,26 +375,26 @@ describeDatabase("cleanupHistoryForVisitor", () => {
     // an entry aged to exactly retentionDays would be flaky — placed a comfortable 60s inside
     // the window instead to deterministically exercise "not yet old enough to delete" without
     // being sensitive to the few milliseconds that elapse between setup and the cleanup call.
-    const created = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "just inside", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const created = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "just inside", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
     const retentionDays = 90;
     const justInsideCutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000 + 60_000);
     await db.update(explorerHistoryEntries).set({ createdAt: justInsideCutoff }).where(eq(explorerHistoryEntries.id, created.id));
 
-    await cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays, maxEntries: 300 });
+    await cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays, maxEntries: 300 });
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: created.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: created.id })).not.toBeNull();
   });
 
   it("boundary: an entry one millisecond past the cutoff is deleted", async () => {
     if (!db) throw new Error("unreachable");
-    const created = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "just past", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const created = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "just past", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
     const retentionDays = 90;
     const justPastCutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000 - 1);
     await db.update(explorerHistoryEntries).set({ createdAt: justPastCutoff }).where(eq(explorerHistoryEntries.id, created.id));
 
-    await cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays, maxEntries: 300 });
+    await cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays, maxEntries: 300 });
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: created.id })).toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: created.id })).toBeNull();
   });
 
   it("keeps only the newest N entries under the entry cap, deleting the oldest", async () => {
@@ -378,18 +402,18 @@ describeDatabase("cleanupHistoryForVisitor", () => {
 
     const entries: { id: string }[] = [];
     for (let i = 0; i < 5; i += 1) {
-      entries.push(await createHistoryEntry({ db, visitorId: VISITOR_A, query: `q${i}`, status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] }));
+      entries.push(await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: `q${i}`, status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] }));
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
 
-    await cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: 3 });
+    await cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: 3 });
 
-    const remaining = await listHistoryEntries({ db, visitorId: VISITOR_A });
+    const remaining = await listHistoryEntries({ db, userId: VISITOR_A });
     expect(remaining).toHaveLength(3);
     // Newest 3 (indexes 2, 3, 4) survive; oldest 2 (indexes 0, 1) are gone.
     expect(remaining.map((e) => e.id).sort()).toEqual([entries[2].id, entries[3].id, entries[4].id].sort());
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: entries[0].id })).toBeNull();
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: entries[1].id })).toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: entries[0].id })).toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: entries[1].id })).toBeNull();
   });
 
   it("applies retention and the entry cap together", async () => {
@@ -398,14 +422,14 @@ describeDatabase("cleanupHistoryForVisitor", () => {
     const stale = await createEntryWithAge(VISITOR_A, "stale", 120);
     const entries: { id: string }[] = [];
     for (let i = 0; i < 4; i += 1) {
-      entries.push(await createHistoryEntry({ db, visitorId: VISITOR_A, query: `q${i}`, status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] }));
+      entries.push(await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: `q${i}`, status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] }));
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
 
-    await cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: 2 });
+    await cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: 2 });
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: stale.id })).toBeNull();
-    const remaining = await listHistoryEntries({ db, visitorId: VISITOR_A });
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: stale.id })).toBeNull();
+    const remaining = await listHistoryEntries({ db, userId: VISITOR_A });
     expect(remaining).toHaveLength(2);
     expect(remaining.map((e) => e.id).sort()).toEqual([entries[2].id, entries[3].id].sort());
   });
@@ -416,10 +440,10 @@ describeDatabase("cleanupHistoryForVisitor", () => {
     const staleA = await createEntryWithAge(VISITOR_A, "stale a", 120);
     const staleB = await createEntryWithAge(VISITOR_B, "stale b", 120);
 
-    await cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: 300 });
+    await cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: 300 });
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: staleA.id })).toBeNull();
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_B, id: staleB.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: staleA.id })).toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_B, id: staleB.id })).not.toBeNull();
   });
 
   it("concurrent history writes for the same visitor cannot leave more than maxEntries rows", async () => {
@@ -429,19 +453,19 @@ describeDatabase("cleanupHistoryForVisitor", () => {
     // followed by cleanup (mirroring the create-then-cleanup order used in
     // src/app/explorer/actions.ts) against a cap of 4.
     for (let i = 0; i < 3; i += 1) {
-      await createHistoryEntry({ db, visitorId: VISITOR_A, query: `seed ${i}`, status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+      await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: `seed ${i}`, status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
     }
 
     const writes = Array.from({ length: 5 }, (_, i) =>
       (async () => {
         if (!db) throw new Error("unreachable");
-        await createHistoryEntry({ db, visitorId: VISITOR_A, query: `concurrent ${i}`, status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
-        await cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: 4 });
+        await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: `concurrent ${i}`, status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+        await cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: 4 });
       })(),
     );
     await Promise.all(writes);
 
-    const remaining = await listHistoryEntries({ db, visitorId: VISITOR_A, limit: 100 });
+    const remaining = await listHistoryEntries({ db, userId: VISITOR_A, limit: 100 });
     expect(remaining.length).toBeLessThanOrEqual(4);
   });
 
@@ -453,89 +477,90 @@ describeDatabase("cleanupHistoryForVisitor", () => {
     // successfully-recorded history entry (and the legal answer it's attached to) is never
     // retroactively broken by an opportunistic-cleanup failure.
     await expect(
-      safeCleanupHistoryForVisitor({ db, visitorId: "not-a-valid-uuid", retentionDays: 90, maxEntries: 300 }),
+      safeCleanupHistoryForVisitor({ db, userId: "not-a-valid-uuid", retentionDays: 90, maxEntries: 300 }),
     ).resolves.toBeUndefined();
   });
 
   it("rejects retentionDays <= 0 and executes no deletion", async () => {
     if (!db) throw new Error("unreachable");
-    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
-    await expect(cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 0, maxEntries: 300 })).rejects.toThrow(HistoryServiceError);
-    await expect(cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: -5, maxEntries: 300 })).rejects.toThrow(HistoryServiceError);
+    await expect(cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 0, maxEntries: 300 })).rejects.toThrow(HistoryServiceError);
+    await expect(cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: -5, maxEntries: 300 })).rejects.toThrow(HistoryServiceError);
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: survivor.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: survivor.id })).not.toBeNull();
   });
 
   it("rejects maxEntries <= 0 and executes no deletion", async () => {
     if (!db) throw new Error("unreachable");
-    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
-    await expect(cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: 0 })).rejects.toThrow(HistoryServiceError);
-    await expect(cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: -1 })).rejects.toThrow(HistoryServiceError);
+    await expect(cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: 0 })).rejects.toThrow(HistoryServiceError);
+    await expect(cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: -1 })).rejects.toThrow(HistoryServiceError);
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: survivor.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: survivor.id })).not.toBeNull();
   });
 
   it("rejects both limits being 0/0 (the exact combination that previously wiped all History) and executes no deletion", async () => {
     if (!db) throw new Error("unreachable");
-    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
-    await expect(cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 0, maxEntries: 0 })).rejects.toThrow(HistoryServiceError);
+    await expect(cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 0, maxEntries: 0 })).rejects.toThrow(HistoryServiceError);
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: survivor.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: survivor.id })).not.toBeNull();
   });
 
   it("rejects non-integer limits and executes no deletion", async () => {
     if (!db) throw new Error("unreachable");
-    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
-    await expect(cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90.5, maxEntries: 300 })).rejects.toThrow(HistoryServiceError);
-    await expect(cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: 3.2 })).rejects.toThrow(HistoryServiceError);
+    await expect(cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90.5, maxEntries: 300 })).rejects.toThrow(HistoryServiceError);
+    await expect(cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: 3.2 })).rejects.toThrow(HistoryServiceError);
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: survivor.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: survivor.id })).not.toBeNull();
   });
 
   it("rejects non-finite limits (NaN/Infinity) and executes no deletion", async () => {
     if (!db) throw new Error("unreachable");
-    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
-    await expect(cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: Number.NaN, maxEntries: 300 })).rejects.toThrow(HistoryServiceError);
-    await expect(cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: Number.POSITIVE_INFINITY })).rejects.toThrow(HistoryServiceError);
+    await expect(cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: Number.NaN, maxEntries: 300 })).rejects.toThrow(HistoryServiceError);
+    await expect(cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: Number.POSITIVE_INFINITY })).rejects.toThrow(HistoryServiceError);
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: survivor.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: survivor.id })).not.toBeNull();
   });
 
   it("safeCleanupHistoryForVisitor swallows the invalid-limits error and still executes no deletion", async () => {
     if (!db) throw new Error("unreachable");
-    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    const survivor = await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "should survive", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
-    await expect(safeCleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 0, maxEntries: 0 })).resolves.toBeUndefined();
+    await expect(safeCleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 0, maxEntries: 0 })).resolves.toBeUndefined();
 
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: survivor.id })).not.toBeNull();
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: survivor.id })).not.toBeNull();
   });
 
   it("manual clear behavior is unaffected by the existence of automatic cleanup", async () => {
     if (!db) throw new Error("unreachable");
 
-    await createHistoryEntry({ db, visitorId: VISITOR_A, query: "a1", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
-    await createHistoryEntry({ db, visitorId: VISITOR_A, query: "a2", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "a1", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
+    await createHistoryEntry({ db, visitorId: VISITOR_A, userId: VISITOR_A, query: "a2", status: "answered", snapshot: snapshot(), corpusVersionIds: [CORPUS_VERSION_ID] });
 
-    await clearHistory({ db, visitorId: VISITOR_A, scope: "all" });
+    await clearHistory({ db, userId: VISITOR_A, scope: "all" });
 
-    expect(await listHistoryEntries({ db, visitorId: VISITOR_A })).toEqual([]);
+    expect(await listHistoryEntries({ db, userId: VISITOR_A })).toEqual([]);
   });
 
   it("history-disabled mode performs no writes and needs no cleanup call (empty visitorId is a safe no-op)", async () => {
     if (!db) throw new Error("unreachable");
-    await expect(cleanupHistoryForVisitor({ db, visitorId: "", retentionDays: 90, maxEntries: 300 })).resolves.toBeUndefined();
-    expect(await listHistoryEntries({ db, visitorId: VISITOR_A })).toEqual([]);
+    await expect(cleanupHistoryForVisitor({ db, userId: "", retentionDays: 90, maxEntries: 300 })).resolves.toBeUndefined();
+    expect(await listHistoryEntries({ db, userId: VISITOR_A })).toEqual([]);
   });
 });
 
 describeDatabase("Saved independence from History retention", () => {
   beforeEach(async () => {
     if (!db) return;
+    await seedFixtureUsers();
     await db.delete(explorerHistoryEntries).where(eq(explorerHistoryEntries.visitorId, VISITOR_A));
     await db.delete(explorerSavedItems).where(eq(explorerSavedItems.visitorId, VISITOR_A));
   });
@@ -544,7 +569,7 @@ describeDatabase("Saved independence from History retention", () => {
     if (!db) throw new Error("unreachable");
 
     const entry = await createEntryWithAge(VISITOR_A, "sąsiad wyciął drzewo", 120);
-    const entryFetchedBeforeCleanup = await getHistoryEntry({ db, visitorId: VISITOR_A, id: entry.id });
+    const entryFetchedBeforeCleanup = await getHistoryEntry({ db, userId: VISITOR_A, id: entry.id });
     if (!entryFetchedBeforeCleanup) throw new Error("unreachable");
 
     const savedSnapshot: SavedAnswerSnapshot = {
@@ -561,6 +586,7 @@ describeDatabase("Saved independence from History retention", () => {
     const saved = await createSavedItem({
       db,
       visitorId: VISITOR_A,
+      userId: VISITOR_A,
       kind: "answer",
       title: "Sąsiad wyciął drzewo",
       query: entryFetchedBeforeCleanup.query,
@@ -571,11 +597,11 @@ describeDatabase("Saved independence from History retention", () => {
     if (saved.status !== "created") throw new Error("unreachable");
 
     // Retention removes the source History entry.
-    await cleanupHistoryForVisitor({ db, visitorId: VISITOR_A, retentionDays: 90, maxEntries: 300 });
-    expect(await getHistoryEntry({ db, visitorId: VISITOR_A, id: entry.id })).toBeNull();
+    await cleanupHistoryForVisitor({ db, userId: VISITOR_A, retentionDays: 90, maxEntries: 300 });
+    expect(await getHistoryEntry({ db, userId: VISITOR_A, id: entry.id })).toBeNull();
 
     // The Saved copy is untouched and still opens correctly, entirely independent of History.
-    const stillSaved = await getSavedItem({ db, visitorId: VISITOR_A, id: saved.id });
+    const stillSaved = await getSavedItem({ db, userId: VISITOR_A, id: saved.id });
     expect(stillSaved).not.toBeNull();
     expect(stillSaved?.snapshot).toEqual(savedSnapshot);
   });
